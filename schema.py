@@ -1,51 +1,30 @@
 """
 Schema de Structured Output para el asistente Kilocalculator.
 
-Reproduce el `response_format: json_schema` ("macronutrientes_y_kcal") que tenías
-en la Assistants API. Aquí lo expresamos como modelos Pydantic; el SDK de OpenAI
-los convierte automáticamente a un JSON Schema estricto cuando se usa
-`client.responses.parse(..., text_format=RespuestaKilocalculator)`.
+Diseño "híbrido mínimo": los nombres de los macros coinciden 1:1 con el schema
+real del dashboard, `macronutrientes_y_kcal` (kilocalorias / proteinas /
+carbohidratos / grasas). PERO no adoptamos ese schema literal: lo envolvemos en
+un sobre de DOS MODOS (`requiere_mas_informacion` + `pregunta`) para conservar la
+conducta de "hacer preguntas" del asistente, y agregamos `platillo` (texto) para
+poder guardarlo. El SDK de OpenAI convierte este modelo Pydantic a un JSON Schema
+estricto al usar `client.responses.parse(..., text_format=RespuestaKilocalculator)`.
 
-NOTA: este schema es una propuesta razonable. Cuando tengas a la mano tu schema
-real (en el dashboard, ícono de editar junto a "Response format"), ajusta los
-campos para que coincidan 1:1. La estructura general —poder PREGUNTAR o RESPONDER—
-es lo importante para migrar el comportamiento del asistente.
+Todos los campos vienen SIEMPRE presentes en el JSON; los que no aplican llegan
+en `null`. El cliente ramifica por `requiere_mas_informacion`, no por presencia.
 """
 
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
 
-class Ingrediente(BaseModel):
-    """Desglose por ingrediente identificado en el platillo."""
-
-    nombre: str = Field(description="Nombre del ingrediente, p. ej. 'tortilla de maíz'.")
-    cantidad: str = Field(description="Cantidad estimada, p. ej. '2 piezas' o '150 g'.")
-    kcal: float = Field(description="Kilocalorías aportadas por este ingrediente.")
-    proteinas_g: float
-    carbohidratos_g: float
-    grasas_g: float
-
-
-class Totales(BaseModel):
-    """Suma de kcal y macronutrientes del platillo completo."""
-
-    kcal: float
-    proteinas_g: float
-    carbohidratos_g: float
-    grasas_g: float
-
-
 class RespuestaKilocalculator(BaseModel):
     """
-    Respuesta del asistente en CADA turno.
+    Respuesta del asistente en CADA turno, en uno de dos modos controlado por
+    `requiere_mas_informacion`:
 
-    El asistente "hace cuantas preguntas sean necesarias", así que cada respuesta
-    es de uno de dos tipos, controlado por `requiere_mas_informacion`:
-
-      * True  -> aún falta info. Llena `pregunta` y deja `totales`/`ingredientes` en null.
-      * False -> ya hay cálculo final. Llena `platillo`, `ingredientes` y `totales`.
+      * True  -> aún falta info. Llena `pregunta`; deja `platillo` y los macros en null.
+      * False -> resultado final. Llena `platillo` y los 4 macros; deja `pregunta` en null.
     """
 
     requiere_mas_informacion: bool = Field(
@@ -56,15 +35,18 @@ class RespuestaKilocalculator(BaseModel):
         description="La pregunta de seguimiento al usuario (solo si requiere_mas_informacion=True).",
     )
     platillo: Optional[str] = Field(
-        default=None, description="Nombre del platillo una vez identificado."
-    )
-    ingredientes: Optional[List[Ingrediente]] = Field(
-        default=None, description="Desglose por ingrediente (solo en la respuesta final)."
-    )
-    totales: Optional[Totales] = Field(
-        default=None, description="Totales de kcal y macros (solo en la respuesta final)."
-    )
-    supuestos: Optional[str] = Field(
         default=None,
-        description="Supuestos hechos para el cálculo (porciones, preparación, contexto CDMX).",
+        description="Nombre/descripción del platillo identificado (solo en el resultado final).",
+    )
+    kilocalorias: Optional[float] = Field(
+        default=None, description="Valor energético total en kilocalorías (kcal). Solo en el final."
+    )
+    proteinas: Optional[float] = Field(
+        default=None, description="Proteínas en gramos (g). Solo en el final."
+    )
+    carbohidratos: Optional[float] = Field(
+        default=None, description="Carbohidratos en gramos (g). Solo en el final."
+    )
+    grasas: Optional[float] = Field(
+        default=None, description="Grasas en gramos (g). Solo en el final."
     )

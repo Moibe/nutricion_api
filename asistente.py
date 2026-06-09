@@ -27,10 +27,11 @@ final. El contexto es que estás en Ciudad de México.
 Reglas de formato de respuesta:
 - Si todavía necesitas más información para calcular con precisión, responde con \
 requiere_mas_informacion=true y escribe tu duda en el campo "pregunta". Deja \
-"ingredientes" y "totales" vacíos.
+"platillo" y los macros (kilocalorias, proteinas, carbohidratos, grasas) en null.
 - Cuando ya tengas suficiente información, responde con requiere_mas_informacion=false, \
-identifica el "platillo", desglosa "ingredientes" y entrega los "totales". Usa \
-"supuestos" para explicar porciones o preparación asumidas.
+identifica el "platillo" (nombre/descripción breve) y entrega los totales del platillo \
+completo en "kilocalorias" (kcal) y "proteinas", "carbohidratos", "grasas" (en gramos). \
+No desgloses por ingrediente.
 """
 
 
