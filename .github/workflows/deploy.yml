@@ -1,0 +1,29 @@
+name: deploy nutricion_api 🥗
+
+on:
+    push:
+        branches:
+            - main
+    workflow_dispatch:
+
+jobs:
+    deploy:
+        name: pull · venv · restart
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: install ssh key
+              run: |
+                  install -m 600 -D /dev/null ~/.ssh/id_rsa
+                  echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+                  ssh-keyscan -H ${{ secrets.SSH_HOST }} > ~/.ssh/known_hosts
+
+            # pm2 vive en nvm; una shell SSH no-interactiva no lo carga sola, así
+            # que se exporta nvm explícitamente antes de usarlo (aunque el proceso
+            # en sí sea Python, pm2 es lo que lo supervisa).
+            - name: deploy on droplet
+              run: |
+                  ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use node >/dev/null && { [ -d ~/code/nutricion_api ] || git clone git@github.com:Moibe/nutricion_api.git ~/code/nutricion_api; } && cd ~/code/nutricion_api && git checkout main && git pull origin main && { [ -d venv ] || python3 -m venv venv; } && venv/bin/pip install -q -r requirements.txt && (pm2 restart nutricion-api --update-env || pm2 start "venv/bin/python" --name nutricion-api --interpreter none -- -m uvicorn main:app --host 0.0.0.0 --port 8002)'
+
+            - name: cleanup
+              run: rm -rf ~/.ssh

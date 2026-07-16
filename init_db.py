@@ -1,56 +1,33 @@
 #!/usr/bin/env python3
 """
-Crea la tabla `consumos` en MariaDB. Corre una vez (o cuando cambie el esquema):
+Verifica/crea el archivo SQLite y la tabla `consumos`. No es un paso
+obligatorio: get_connection() ya crea el esquema sola en el primer uso; este
+script sirve para confirmar el estado o inspeccionar la estructura a mano.
 
     .venv/Scripts/python.exe init_db.py
-
-Requiere las variables de DB en .env (DB_HOST, DB_USER, mariadb_c, DB_NAME, DB_PORT).
 """
 
 import sys
 
-from connection import get_connection
+from connection import DB_PATH, get_connection
 
 
 def init_database():
-    conn = get_connection()
-    if not conn:
-        print("❌ No se pudo conectar a la base de datos (revisa .env)")
-        sys.exit(1)
-
     try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS `consumos` (
-                `id` BIGINT AUTO_INCREMENT PRIMARY KEY,
-                `conversation_id` VARCHAR(64) NOT NULL UNIQUE
-                    COMMENT 'conversation_id de OpenAI; upsert por conversación',
-                `platillo` TEXT COMMENT 'Nombre/descripción del platillo final',
-                `kilocalorias` DOUBLE COMMENT 'Energía total (kcal)',
-                `proteinas` DOUBLE COMMENT 'Proteínas (g)',
-                `carbohidratos` DOUBLE COMMENT 'Carbohidratos (g)',
-                `grasas` DOUBLE COMMENT 'Grasas (g)',
-                `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                `updated_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                KEY `idx_created_at` (`created_at`)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-            COMMENT='Consumos calculados (platillo + macros) por el Kilocalculator'
-            """
-        )
-        conn.commit()
-        print("✅ Tabla 'consumos' lista")
-
-        cursor.execute("DESCRIBE `consumos`")
-        print("\n📋 Estructura:")
-        print("-" * 60)
-        for col in cursor.fetchall():
-            print(f"  {col[0]:<18} {col[1]:<28} {col[2]}")
-        cursor.close()
-        conn.close()
+        conn = get_connection()
     except Exception as e:
-        print(f"❌ Error al crear la tabla: {e}")
+        print(f"❌ No se pudo abrir la base de datos: {e}")
         sys.exit(1)
+
+    print(f"✅ Base de datos lista en {DB_PATH}")
+
+    cursor = conn.execute("PRAGMA table_info(consumos)")
+    print("\n📋 Estructura de 'consumos':")
+    print("-" * 60)
+    for cid, name, col_type, notnull, default, pk in cursor.fetchall():
+        flags = " ".join(f for f in ("PK" if pk else "", "NOT NULL" if notnull else "") if f)
+        print(f"  {name:<18} {col_type:<10} {flags}")
+    conn.close()
 
 
 if __name__ == "__main__":

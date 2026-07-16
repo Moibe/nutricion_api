@@ -1,37 +1,42 @@
 """
-Conexión a MariaDB y persistencia de consumos.
+Conexión a SQLite y persistencia de consumos.
 
-Mismo patrón que tus proyectos `fastapi-mariadb*`: `mysql-connector-python`,
-variables de entorno DB_HOST / DB_USER / mariadb_c (password) / DB_NAME / DB_PORT,
-y `autocommit=True`.
+Un solo archivo de base de datos, sin servidor ni credenciales que administrar
+(mismo espíritu que tus proyectos SvelteKit con Drizzle + better-sqlite3).
 """
 
 import os
+import sqlite3
+from pathlib import Path
 
-import mysql.connector
 from dotenv import load_dotenv
 
 load_dotenv()
 
+DB_PATH = Path(os.getenv("DB_PATH", Path(__file__).parent / "nutricion.db"))
 
-def get_connection():
+
+def get_connection() -> sqlite3.Connection:
     """
-    Establece una conexión con MariaDB. Retorna la conexión o None si falla
-    (p. ej. credenciales ausentes en .env). Nunca lanza.
+    Abre la base de datos (se crea sola si no existe) y asegura el esquema.
     """
-    try:
-        conn = mysql.connector.connect(
-            host=os.getenv("DB_HOST"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("mariadb_c"),
-            database=os.getenv("DB_NAME"),
-            port=int(os.getenv("DB_PORT", 3306)),
-            autocommit=True,
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS consumos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT NOT NULL UNIQUE,
+            platillo TEXT,
+            kilocalorias REAL,
+            proteinas REAL,
+            carbohidratos REAL,
+            grasas REAL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
-        return conn
-    except mysql.connector.Error as err:
-        print(f"[WARN] No se pudo conectar a MariaDB: {err}")
-        return None
+        """
+    )
+    return conn
 
 
 def guardar_consumo(conversation_id: str, datos) -> None:
@@ -43,26 +48,24 @@ def guardar_consumo(conversation_id: str, datos) -> None:
     Upsert por `conversation_id`: si el usuario refina y se recalcula la misma
     conversación, se ACTUALIZA la fila en vez de duplicar.
 
-    LANZA si la DB no está disponible o la query falla. El endpoint /consumos
-    traduce el error a un HTTP 503 para que el usuario reciba feedback del
-    guardado (es una acción deliberada con botón, no un guardado automático).
+    LANZA si la escritura falla (p. ej. permisos de archivo). El endpoint
+    /consumos traduce el error a un HTTP 503 para que el usuario reciba
+    feedback del guardado (es una acción deliberada con botón, no automática).
     """
     conn = get_connection()
-    if conn is None:
-        raise RuntimeError("No hay conexión a MariaDB (revisa las credenciales en .env).")
     try:
-        cursor = conn.cursor()
-        cursor.execute(
+        conn.execute(
             """
             INSERT INTO consumos
                 (conversation_id, platillo, kilocalorias, proteinas, carbohidratos, grasas)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                platillo = VALUES(platillo),
-                kilocalorias = VALUES(kilocalorias),
-                proteinas = VALUES(proteinas),
-                carbohidratos = VALUES(carbohidratos),
-                grasas = VALUES(grasas)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                platillo = excluded.platillo,
+                kilocalorias = excluded.kilocalorias,
+                proteinas = excluded.proteinas,
+                carbohidratos = excluded.carbohidratos,
+                grasas = excluded.grasas,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (
                 conversation_id,
@@ -73,6 +76,6 @@ def guardar_consumo(conversation_id: str, datos) -> None:
                 datos.grasas,
             ),
         )
-        cursor.close()
+        conn.commit()
     finally:
         conn.close()
