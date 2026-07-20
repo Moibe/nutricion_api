@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Verifica/crea el archivo SQLite y la tabla `consumos`. No es un paso
-obligatorio: get_connection() ya crea el esquema sola en el primer uso; este
-script sirve para confirmar el estado o inspeccionar la estructura a mano.
+Verifica/crea el archivo SQLite y las tablas `comidas`/`consumos`. No es un
+paso obligatorio: get_connection() ya crea el esquema sola en el primer uso;
+este script sirve para confirmar el estado o inspeccionar la estructura a mano.
 
     .venv/Scripts/python.exe init_db.py
 """
@@ -10,6 +10,15 @@ script sirve para confirmar el estado o inspeccionar la estructura a mano.
 import sys
 
 from connection import DB_PATH, get_connection
+
+
+def _print_tabla(conn, nombre):
+    cursor = conn.execute(f"PRAGMA table_info({nombre})")
+    print(f"\n📋 Estructura de '{nombre}':")
+    print("-" * 60)
+    for cid, name, col_type, notnull, default, pk in cursor.fetchall():
+        flags = " ".join(f for f in ("PK" if pk else "", "NOT NULL" if notnull else "") if f)
+        print(f"  {name:<18} {col_type:<10} {flags}")
 
 
 def init_database():
@@ -20,13 +29,8 @@ def init_database():
         sys.exit(1)
 
     print(f"✅ Base de datos lista en {DB_PATH}")
-
-    cursor = conn.execute("PRAGMA table_info(consumos)")
-    print("\n📋 Estructura de 'consumos':")
-    print("-" * 60)
-    for cid, name, col_type, notnull, default, pk in cursor.fetchall():
-        flags = " ".join(f for f in ("PK" if pk else "", "NOT NULL" if notnull else "") if f)
-        print(f"  {name:<18} {col_type:<10} {flags}")
+    _print_tabla(conn, "comidas")
+    _print_tabla(conn, "consumos")
     conn.close()
 
 

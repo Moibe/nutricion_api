@@ -3,3 +3,4 @@ uvicorn[standard]>=0.30
 openai>=2.39.0
 pydantic>=2.7
 python-dotenv>=1.0
+tzdata>=2024.1

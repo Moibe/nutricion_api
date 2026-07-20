@@ -7,14 +7,14 @@ Docs interactivas:  http://127.0.0.1:8000/docs
 """
 
 import os
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
-from connection import guardar_consumo
+from connection import actualizar_fecha_comida, crear_comida, guardar_consumo
 from schema import RespuestaKilocalculator
 
 client = crear_cliente()
@@ -35,7 +35,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,  # el front no manda cookies ni Authorization
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -107,3 +107,32 @@ def crear_consumo(consumo: ConsumoIn):
     except Exception as exc:  # noqa: BLE001 — feedback de guardado al usuario
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
     return {"ok": True}
+
+
+# --- Comidas: agrupan varios consumos (botones Desayuno/Colación/Comida/Cena) --
+class ComidaIn(BaseModel):
+    tipo: Literal["desayuno", "comida", "cena", "colacion"]
+
+
+class FechaIn(BaseModel):
+    fecha: str  # "YYYY-MM-DD"
+
+
+@app.post("/comidas")
+def crear_comida_endpoint(comida: ComidaIn):
+    """Crea una instancia de comida (fecha = hoy en CDMX por default)."""
+    try:
+        return crear_comida(comida.tipo)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo crear la comida: {exc}") from exc
+
+
+@app.patch("/comidas/{comida_id}")
+def actualizar_fecha_comida_endpoint(comida_id: int, body: FechaIn):
+    """Cambia la fecha de una comida (botón de calendario del front)."""
+    try:
+        return actualizar_fecha_comida(comida_id, body.fecha)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo actualizar: {exc}") from exc
