@@ -43,6 +43,10 @@ def get_connection() -> sqlite3.Connection:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tipo TEXT NOT NULL CHECK (tipo IN ('desayuno', 'comida', 'cena', 'colacion')),
             fecha TEXT NOT NULL,
+            -- Posición en la secuencia del día (Desayuno=0, Colación 1=1,
+            -- Comida=2, Colación 2=3, Cena=4). Separado de `tipo` porque las
+            -- dos colaciones comparten tipo pero van en momentos distintos.
+            orden INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
@@ -67,16 +71,20 @@ def get_connection() -> sqlite3.Connection:
     columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(consumos)")}
     if "comida_id" not in columnas:
         conn.execute("ALTER TABLE consumos ADD COLUMN comida_id INTEGER REFERENCES comidas(id)")
+    # Migración in-place para bases creadas antes de que existiera orden.
+    columnas_comidas = {fila[1] for fila in conn.execute("PRAGMA table_info(comidas)")}
+    if "orden" not in columnas_comidas:
+        conn.execute("ALTER TABLE comidas ADD COLUMN orden INTEGER NOT NULL DEFAULT 0")
     return conn
 
 
-def crear_comida(tipo: str) -> dict:
+def crear_comida(tipo: str, orden: int = 0) -> dict:
     """Crea una instancia de comida (tipo + fecha de hoy en CDMX) y la regresa."""
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO comidas (tipo, fecha) VALUES (?, ?)",
-            (tipo, hoy_cdmx()),
+            "INSERT INTO comidas (tipo, fecha, orden) VALUES (?, ?, ?)",
+            (tipo, hoy_cdmx(), orden),
         )
         conn.commit()
         return obtener_comida(conn, cursor.lastrowid)
@@ -101,9 +109,9 @@ def actualizar_fecha_comida(comida_id: int, fecha: str) -> dict:
 
 def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
     fila = conn.execute(
-        "SELECT id, tipo, fecha, created_at FROM comidas WHERE id = ?", (comida_id,)
+        "SELECT id, tipo, fecha, orden, created_at FROM comidas WHERE id = ?", (comida_id,)
     ).fetchone()
-    return {"id": fila[0], "tipo": fila[1], "fecha": fila[2], "created_at": fila[3]}
+    return {"id": fila[0], "tipo": fila[1], "fecha": fila[2], "orden": fila[3], "created_at": fila[4]}
 
 
 def listar_comidas() -> list[dict]:
@@ -111,18 +119,27 @@ def listar_comidas() -> list[dict]:
     Lista las comidas GUARDADAS (con al menos un consumo asociado), cada una
     con sus consumos anidados. Las comidas vacías (se creó la instancia con el
     botón pero nunca se le guardó un consumo) se omiten — son cascarones sin
-    información nutricional. Orden: fecha más reciente primero.
+    información nutricional. Orden: día más reciente primero; dentro del
+    mismo día, en la secuencia en que se comen (orden ASC — Desayuno,
+    Colación 1, Comida, Colación 2, Cena), no por cuándo se guardaron.
     """
     conn = get_connection()
     try:
         comidas = [
-            {"id": f[0], "tipo": f[1], "fecha": f[2], "created_at": f[3], "consumos": []}
+            {
+                "id": f[0],
+                "tipo": f[1],
+                "fecha": f[2],
+                "orden": f[3],
+                "created_at": f[4],
+                "consumos": [],
+            }
             for f in conn.execute(
                 """
-                SELECT DISTINCT c.id, c.tipo, c.fecha, c.created_at
+                SELECT DISTINCT c.id, c.tipo, c.fecha, c.orden, c.created_at
                 FROM comidas c
                 JOIN consumos x ON x.comida_id = c.id
-                ORDER BY c.fecha DESC, c.id DESC
+                ORDER BY c.fecha DESC, c.orden ASC, c.id ASC
                 """
             )
         ]
