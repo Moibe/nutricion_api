@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
-from connection import actualizar_fecha_comida, crear_comida, guardar_consumo
+from connection import actualizar_fecha_comida, crear_comida, guardar_consumo, listar_comidas
 from schema import RespuestaKilocalculator
 
 client = crear_cliente()
@@ -117,6 +117,15 @@ class ComidaIn(BaseModel):
 
 class FechaIn(BaseModel):
     fecha: str  # "YYYY-MM-DD"
+
+
+@app.get("/comidas")
+def listar_comidas_endpoint():
+    """Lista las comidas con al menos un consumo guardado, con sus consumos anidados."""
+    try:
+        return listar_comidas()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
 @app.post("/comidas")

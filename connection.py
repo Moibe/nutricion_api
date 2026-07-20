@@ -106,6 +106,51 @@ def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
     return {"id": fila[0], "tipo": fila[1], "fecha": fila[2], "created_at": fila[3]}
 
 
+def listar_comidas() -> list[dict]:
+    """
+    Lista las comidas GUARDADAS (con al menos un consumo asociado), cada una
+    con sus consumos anidados. Las comidas vacías (se creó la instancia con el
+    botón pero nunca se le guardó un consumo) se omiten — son cascarones sin
+    información nutricional. Orden: fecha más reciente primero.
+    """
+    conn = get_connection()
+    try:
+        comidas = [
+            {"id": f[0], "tipo": f[1], "fecha": f[2], "created_at": f[3], "consumos": []}
+            for f in conn.execute(
+                """
+                SELECT DISTINCT c.id, c.tipo, c.fecha, c.created_at
+                FROM comidas c
+                JOIN consumos x ON x.comida_id = c.id
+                ORDER BY c.fecha DESC, c.id DESC
+                """
+            )
+        ]
+        por_id = {c["id"]: c for c in comidas}
+        for f in conn.execute(
+            """
+            SELECT comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
+            FROM consumos
+            WHERE comida_id IS NOT NULL
+            ORDER BY id
+            """
+        ):
+            comida = por_id.get(f[0])
+            if comida:
+                comida["consumos"].append(
+                    {
+                        "platillo": f[1],
+                        "kilocalorias": f[2],
+                        "proteinas": f[3],
+                        "carbohidratos": f[4],
+                        "grasas": f[5],
+                    }
+                )
+        return comidas
+    finally:
+        conn.close()
+
+
 def guardar_consumo(conversation_id: str, datos) -> None:
     """
     Persiste el resultado final (platillo + 4 macros) en la tabla `consumos`.
