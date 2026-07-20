@@ -92,6 +92,7 @@ def chat(req: ChatRequest):
 # --- Guardado manual del platillo final (botón "Guardar" del front) -----------
 class ConsumoIn(BaseModel):
     conversation_id: str
+    comida_id: Optional[int] = None
     platillo: Optional[str] = None
     kilocalorias: Optional[float] = None
     proteinas: Optional[float] = None

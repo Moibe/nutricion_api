@@ -109,24 +109,28 @@ def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
 def guardar_consumo(conversation_id: str, datos) -> None:
     """
     Persiste el resultado final (platillo + 4 macros) en la tabla `consumos`.
-    `datos` es cualquier objeto con .platillo/.kilocalorias/.proteinas/
-    .carbohidratos/.grasas (p. ej. el ConsumoIn que llega del front).
+    `datos` es cualquier objeto con .comida_id/.platillo/.kilocalorias/
+    .proteinas/.carbohidratos/.grasas (p. ej. el ConsumoIn que llega del front).
+    `comida_id` es opcional: null si el consumo se guarda suelto (fuera de
+    una comida), o el id de la comida a la que pertenece.
 
     Upsert por `conversation_id`: si el usuario refina y se recalcula la misma
     conversación, se ACTUALIZA la fila en vez de duplicar.
 
-    LANZA si la escritura falla (p. ej. permisos de archivo). El endpoint
-    /consumos traduce el error a un HTTP 503 para que el usuario reciba
-    feedback del guardado (es una acción deliberada con botón, no automática).
+    LANZA si la escritura falla (p. ej. permisos de archivo, o comida_id que
+    no existe — la FK lo rechaza). El endpoint /consumos traduce el error a
+    un HTTP 503 para que el usuario reciba feedback del guardado (es una
+    acción deliberada con botón, no automática).
     """
     conn = get_connection()
     try:
         conn.execute(
             """
             INSERT INTO consumos
-                (conversation_id, platillo, kilocalorias, proteinas, carbohidratos, grasas)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (conversation_id, comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
+                comida_id = excluded.comida_id,
                 platillo = excluded.platillo,
                 kilocalorias = excluded.kilocalorias,
                 proteinas = excluded.proteinas,
@@ -136,6 +140,7 @@ def guardar_consumo(conversation_id: str, datos) -> None:
             """,
             (
                 conversation_id,
+                datos.comida_id,
                 datos.platillo,
                 datos.kilocalorias,
                 datos.proteinas,
