@@ -146,21 +146,22 @@ def listar_comidas() -> list[dict]:
         por_id = {c["id"]: c for c in comidas}
         for f in conn.execute(
             """
-            SELECT comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
+            SELECT id, comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
             FROM consumos
             WHERE comida_id IS NOT NULL
             ORDER BY id
             """
         ):
-            comida = por_id.get(f[0])
+            comida = por_id.get(f[1])
             if comida:
                 comida["consumos"].append(
                     {
-                        "platillo": f[1],
-                        "kilocalorias": f[2],
-                        "proteinas": f[3],
-                        "carbohidratos": f[4],
-                        "grasas": f[5],
+                        "id": f[0],
+                        "platillo": f[2],
+                        "kilocalorias": f[3],
+                        "proteinas": f[4],
+                        "carbohidratos": f[5],
+                        "grasas": f[6],
                     }
                 )
         return comidas
@@ -168,7 +169,50 @@ def listar_comidas() -> list[dict]:
         conn.close()
 
 
-def guardar_consumo(conversation_id: str, datos) -> None:
+def actualizar_consumo(consumo_id: int, datos) -> dict:
+    """
+    Edita un consumo ya guardado (botón de editar del Listado). `datos` tiene
+    .platillo/.kilocalorias/.proteinas/.carbohidratos/.grasas — se sobrescriben
+    todos, no es un parche parcial.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE consumos
+            SET platillo = ?, kilocalorias = ?, proteinas = ?, carbohidratos = ?,
+                grasas = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                datos.platillo,
+                datos.kilocalorias,
+                datos.proteinas,
+                datos.carbohidratos,
+                datos.grasas,
+                consumo_id,
+            ),
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el consumo {consumo_id}")
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, platillo, kilocalorias, proteinas, carbohidratos, grasas FROM consumos WHERE id = ?",
+            (consumo_id,),
+        ).fetchone()
+        return {
+            "id": fila[0],
+            "platillo": fila[1],
+            "kilocalorias": fila[2],
+            "proteinas": fila[3],
+            "carbohidratos": fila[4],
+            "grasas": fila[5],
+        }
+    finally:
+        conn.close()
+
+
+def guardar_consumo(conversation_id: str, datos) -> dict:
     """
     Persiste el resultado final (platillo + 4 macros) en la tabla `consumos`.
     `datos` es cualquier objeto con .comida_id/.platillo/.kilocalorias/
@@ -177,7 +221,10 @@ def guardar_consumo(conversation_id: str, datos) -> None:
     una comida), o el id de la comida a la que pertenece.
 
     Upsert por `conversation_id`: si el usuario refina y se recalcula la misma
-    conversación, se ACTUALIZA la fila en vez de duplicar.
+    conversación, se ACTUALIZA la fila en vez de duplicar. Regresa la fila
+    resultante (con su id) para que el front pueda editarla después sin
+    recargar — no se puede confiar en cursor.lastrowid porque en la rama
+    ON CONFLICT DO UPDATE no refleja el id de la fila actualizada.
 
     LANZA si la escritura falla (p. ej. permisos de archivo, o comida_id que
     no existe — la FK lo rechaza). El endpoint /consumos traduce el error a
@@ -211,5 +258,17 @@ def guardar_consumo(conversation_id: str, datos) -> None:
             ),
         )
         conn.commit()
+        fila = conn.execute(
+            "SELECT id, platillo, kilocalorias, proteinas, carbohidratos, grasas FROM consumos WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        return {
+            "id": fila[0],
+            "platillo": fila[1],
+            "kilocalorias": fila[2],
+            "proteinas": fila[3],
+            "carbohidratos": fila[4],
+            "grasas": fila[5],
+        }
     finally:
         conn.close()

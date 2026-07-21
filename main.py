@@ -14,7 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
-from connection import actualizar_fecha_comida, crear_comida, guardar_consumo, listar_comidas
+from connection import (
+    actualizar_consumo,
+    actualizar_fecha_comida,
+    crear_comida,
+    guardar_consumo,
+    listar_comidas,
+)
 from schema import RespuestaKilocalculator
 
 client = crear_cliente()
@@ -104,10 +110,28 @@ class ConsumoIn(BaseModel):
 def crear_consumo(consumo: ConsumoIn):
     """Upsert (por conversation_id) del platillo final que el usuario decidió guardar."""
     try:
-        guardar_consumo(consumo.conversation_id, consumo)
+        return guardar_consumo(consumo.conversation_id, consumo)
     except Exception as exc:  # noqa: BLE001 — feedback de guardado al usuario
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
-    return {"ok": True}
+
+
+class ConsumoEditIn(BaseModel):
+    platillo: Optional[str] = None
+    kilocalorias: Optional[float] = None
+    proteinas: Optional[float] = None
+    carbohidratos: Optional[float] = None
+    grasas: Optional[float] = None
+
+
+@app.patch("/consumos/{consumo_id}")
+def editar_consumo_endpoint(consumo_id: int, consumo: ConsumoEditIn):
+    """Edita un consumo ya guardado (botón de editar del Listado)."""
+    try:
+        return actualizar_consumo(consumo_id, consumo)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo editar: {exc}") from exc
 
 
 # --- Comidas: agrupan varios consumos (botones Desayuno/Colación/Comida/Cena) --
