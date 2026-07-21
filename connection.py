@@ -146,7 +146,7 @@ def listar_comidas() -> list[dict]:
         por_id = {c["id"]: c for c in comidas}
         for f in conn.execute(
             """
-            SELECT id, comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
+            SELECT id, comida_id, conversation_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
             FROM consumos
             WHERE comida_id IS NOT NULL
             ORDER BY id
@@ -157,57 +157,15 @@ def listar_comidas() -> list[dict]:
                 comida["consumos"].append(
                     {
                         "id": f[0],
-                        "platillo": f[2],
-                        "kilocalorias": f[3],
-                        "proteinas": f[4],
-                        "carbohidratos": f[5],
-                        "grasas": f[6],
+                        "conversation_id": f[2],
+                        "platillo": f[3],
+                        "kilocalorias": f[4],
+                        "proteinas": f[5],
+                        "carbohidratos": f[6],
+                        "grasas": f[7],
                     }
                 )
         return comidas
-    finally:
-        conn.close()
-
-
-def actualizar_consumo(consumo_id: int, datos) -> dict:
-    """
-    Edita un consumo ya guardado (botón de editar del Listado). `datos` tiene
-    .platillo/.kilocalorias/.proteinas/.carbohidratos/.grasas — se sobrescriben
-    todos, no es un parche parcial.
-    """
-    conn = get_connection()
-    try:
-        cursor = conn.execute(
-            """
-            UPDATE consumos
-            SET platillo = ?, kilocalorias = ?, proteinas = ?, carbohidratos = ?,
-                grasas = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            """,
-            (
-                datos.platillo,
-                datos.kilocalorias,
-                datos.proteinas,
-                datos.carbohidratos,
-                datos.grasas,
-                consumo_id,
-            ),
-        )
-        if cursor.rowcount == 0:
-            raise ValueError(f"No existe el consumo {consumo_id}")
-        conn.commit()
-        fila = conn.execute(
-            "SELECT id, platillo, kilocalorias, proteinas, carbohidratos, grasas FROM consumos WHERE id = ?",
-            (consumo_id,),
-        ).fetchone()
-        return {
-            "id": fila[0],
-            "platillo": fila[1],
-            "kilocalorias": fila[2],
-            "proteinas": fila[3],
-            "carbohidratos": fila[4],
-            "grasas": fila[5],
-        }
     finally:
         conn.close()
 
@@ -221,10 +179,14 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
     una comida), o el id de la comida a la que pertenece.
 
     Upsert por `conversation_id`: si el usuario refina y se recalcula la misma
-    conversación, se ACTUALIZA la fila en vez de duplicar. Regresa la fila
-    resultante (con su id) para que el front pueda editarla después sin
-    recargar — no se puede confiar en cursor.lastrowid porque en la rama
-    ON CONFLICT DO UPDATE no refleja el id de la fila actualizada.
+    conversación, se ACTUALIZA la fila en vez de duplicar. Este es también el
+    mecanismo de "editar" un consumo ya guardado: el front reabre la MISMA
+    conversación (mandando el conversation_id original) para seguir chateando
+    con el asistente, y al guardar de nuevo esto actualiza esa fila en vez de
+    crear una nueva. Regresa la fila resultante (con su id) para que el front
+    la pueda usar sin recargar — no se puede confiar en cursor.lastrowid
+    porque en la rama ON CONFLICT DO UPDATE no refleja el id de la fila
+    actualizada.
 
     LANZA si la escritura falla (p. ej. permisos de archivo, o comida_id que
     no existe — la FK lo rechaza). El endpoint /consumos traduce el error a
