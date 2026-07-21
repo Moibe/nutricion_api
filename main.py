@@ -46,6 +46,10 @@ class ChatRequest(BaseModel):
     # En el primer turno se omite; luego se reenvía el de la respuesta anterior
     # para mantener el hilo (equivale al thread_id de la Assistants API).
     conversation_id: Optional[str] = None
+    # Solo al EDITAR un consumo ya guardado: descripción del consumo actual
+    # (platillo + macros). Se inyecta en el primer turno para que el asistente
+    # sepa qué está editando aunque el hilo de OpenAI ya no tenga ese contexto.
+    contexto: Optional[str] = None
 
 
 class ChatResponse(BaseModel):
@@ -74,12 +78,23 @@ def chat(req: ChatRequest):
         conversation = client.conversations.create()
         conversation_id = conversation.id
 
+    entrada = req.mensaje
+    if req.contexto:
+        entrada = (
+            "El usuario está EDITANDO un consumo que ya había calculado antes:\n"
+            f"{req.contexto}\n\n"
+            f"Su indicación para modificarlo es: {req.mensaje}\n\n"
+            "Recalcula el platillo completo tomando en cuenta esta modificación. "
+            "Si necesitas más datos para el nuevo cálculo, pregunta; si no, "
+            "entrega el resultado final actualizado."
+        )
+
     try:
         response = client.responses.parse(
             model=MODELO,
             conversation=conversation_id,
             instructions=INSTRUCCIONES,
-            input=req.mensaje,
+            input=entrada,
             text_format=RespuestaKilocalculator,
             temperature=1.0,
         )
