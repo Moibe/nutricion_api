@@ -14,7 +14,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
-from connection import actualizar_fecha_comida, crear_comida, guardar_consumo, listar_comidas
+from connection import (
+    actualizar_fecha_comida,
+    crear_comida,
+    eliminar_consumo,
+    guardar_consumo,
+    listar_comidas,
+)
 from schema import RespuestaKilocalculator
 
 client = crear_cliente()
@@ -35,7 +41,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,  # el front no manda cookies ni Authorization
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -122,6 +128,18 @@ def crear_consumo(consumo: ConsumoIn):
         return guardar_consumo(consumo.conversation_id, consumo)
     except Exception as exc:  # noqa: BLE001 — feedback de guardado al usuario
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+@app.delete("/consumos/{consumo_id}")
+def eliminar_consumo_endpoint(consumo_id: int):
+    """Borra un consumo (botón de eliminar del Listado)."""
+    try:
+        eliminar_consumo(consumo_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
+    return {"ok": True}
 
 
 # --- Comidas: agrupan varios consumos (botones Desayuno/Colación/Comida/Cena) --

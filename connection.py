@@ -107,6 +107,22 @@ def actualizar_fecha_comida(comida_id: int, fecha: str) -> dict:
         conn.close()
 
 
+def eliminar_consumo(consumo_id: int) -> None:
+    """
+    Borra un consumo (botón de eliminar del Listado). Si era el último de su
+    comida, la comida queda vacía y simplemente deja de aparecer en el listado
+    (listar_comidas hace JOIN con consumos) — no se borra la fila `comidas`.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.execute("DELETE FROM consumos WHERE id = ?", (consumo_id,))
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el consumo {consumo_id}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
     fila = conn.execute(
         "SELECT id, tipo, fecha, orden, created_at FROM comidas WHERE id = ?", (comida_id,)
