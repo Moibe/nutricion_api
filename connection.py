@@ -137,6 +137,24 @@ def eliminar_consumo(consumo_id: int) -> None:
         conn.close()
 
 
+def eliminar_comida(comida_id: int) -> None:
+    """
+    Borra una comida completa junto con todos sus consumos (botón del bote en
+    la tarjeta, a diferencia de eliminar_consumo que solo quita un consumo y
+    puede dejar la comida vacía sin borrar su fila). Se borran los consumos
+    primero porque la FK consumos.comida_id no tiene ON DELETE CASCADE.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM consumos WHERE comida_id = ?", (comida_id,))
+        cursor = conn.execute("DELETE FROM comidas WHERE id = ?", (comida_id,))
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe la comida {comida_id}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
     fila = conn.execute(
         "SELECT id, tipo, fecha, orden, created_at FROM comidas WHERE id = ?", (comida_id,)

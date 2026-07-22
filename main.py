@@ -17,6 +17,7 @@ from asistente import INSTRUCCIONES, MODELO, crear_cliente
 from connection import (
     actualizar_fecha_comida,
     crear_comida,
+    eliminar_comida,
     eliminar_consumo,
     guardar_consumo,
     listar_comidas,
@@ -228,3 +229,15 @@ def actualizar_fecha_comida_endpoint(comida_id: int, body: FechaIn):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo actualizar: {exc}") from exc
+
+
+@app.delete("/comidas/{comida_id}")
+def eliminar_comida_endpoint(comida_id: int):
+    """Borra una comida completa y todos sus consumos (ícono de bote en la tarjeta)."""
+    try:
+        eliminar_comida(comida_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
+    return {"ok": True}
