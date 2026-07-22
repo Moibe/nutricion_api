@@ -75,6 +75,20 @@ def get_connection() -> sqlite3.Connection:
     columnas_comidas = {fila[1] for fila in conn.execute("PRAGMA table_info(comidas)")}
     if "orden" not in columnas_comidas:
         conn.execute("ALTER TABLE comidas ADD COLUMN orden INTEGER NOT NULL DEFAULT 0")
+    # Uso de tokens de OpenAI: una fila por llamada a /chat, para el monitor de gasto.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS uso_ia (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT,
+            modelo TEXT,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            fecha TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     return conn
 
 
@@ -248,5 +262,44 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
             "carbohidratos": fila[4],
             "grasas": fila[5],
         }
+    finally:
+        conn.close()
+
+
+def registrar_uso(conversation_id, modelo: str, input_tokens: int, output_tokens: int) -> None:
+    """Registra el uso de tokens de una llamada a OpenAI (monitor de gasto)."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO uso_ia (conversation_id, modelo, input_tokens, output_tokens, fecha)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (conversation_id, modelo, int(input_tokens or 0), int(output_tokens or 0), hoy_cdmx()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resumen_uso() -> dict:
+    """
+    Totales de tokens (todo el histórico y solo hoy en CDMX). El costo se calcula
+    en el endpoint con los precios configurables; aquí solo agregamos tokens.
+    """
+    conn = get_connection()
+    try:
+
+        def agrega(where: str = "", params: tuple = ()) -> dict:
+            fila = conn.execute(
+                f"""
+                SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+                FROM uso_ia {where}
+                """,
+                params,
+            ).fetchone()
+            return {"llamadas": fila[0], "input_tokens": fila[1], "output_tokens": fila[2]}
+
+        return {"total": agrega(), "hoy": agrega("WHERE fecha = ?", (hoy_cdmx(),))}
     finally:
         conn.close()

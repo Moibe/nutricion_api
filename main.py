@@ -20,6 +20,8 @@ from connection import (
     eliminar_consumo,
     guardar_consumo,
     listar_comidas,
+    registrar_uso,
+    resumen_uso,
 )
 from schema import RespuestaKilocalculator
 
@@ -63,10 +65,40 @@ class ChatResponse(BaseModel):
     respuesta: RespuestaKilocalculator
 
 
+# Precios de gpt-4.1 por 1M de tokens (USD). Configurables por env por si
+# cambian o se usa otro modelo. El costo del monitor es una ESTIMACIÓN con estos.
+PRECIO_INPUT_USD_POR_1M = float(os.getenv("PRECIO_INPUT_USD_POR_1M", "2.0"))
+PRECIO_OUTPUT_USD_POR_1M = float(os.getenv("PRECIO_OUTPUT_USD_POR_1M", "8.0"))
+
+
 # --- Endpoints ----------------------------------------------------------------
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/uso")
+def uso():
+    """Monitor de gasto: tokens usados (total y hoy) + costo estimado en USD."""
+    try:
+        datos = resumen_uso()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo leer el uso: {exc}") from exc
+
+    def con_costo(bloque: dict) -> dict:
+        costo = (
+            bloque["input_tokens"] / 1_000_000 * PRECIO_INPUT_USD_POR_1M
+            + bloque["output_tokens"] / 1_000_000 * PRECIO_OUTPUT_USD_POR_1M
+        )
+        return {**bloque, "costo_usd": round(costo, 4)}
+
+    return {
+        "modelo": MODELO,
+        "precio_input_usd_por_1m": PRECIO_INPUT_USD_POR_1M,
+        "precio_output_usd_por_1m": PRECIO_OUTPUT_USD_POR_1M,
+        "total": con_costo(datos["total"]),
+        "hoy": con_costo(datos["hoy"]),
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -106,6 +138,20 @@ def chat(req: ChatRequest):
         )
     except Exception as exc:  # noqa: BLE001 — en PoC propagamos el detalle
         raise HTTPException(status_code=502, detail=f"Error de OpenAI: {exc}") from exc
+
+    # Registrar uso de tokens (monitor de gasto). Best-effort: si falla, no
+    # rompemos la respuesta del chat.
+    try:
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            registrar_uso(
+                conversation_id,
+                MODELO,
+                getattr(usage, "input_tokens", 0) or 0,
+                getattr(usage, "output_tokens", 0) or 0,
+            )
+    except Exception:  # noqa: BLE001 — el conteo de tokens nunca debe tumbar el chat
+        pass
 
     return ChatResponse(conversation_id=conversation_id, respuesta=response.output_parsed)
 
