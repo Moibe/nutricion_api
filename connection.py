@@ -26,6 +26,10 @@ def hoy_cdmx() -> str:
     return datetime.now(ZONA_CDMX).date().isoformat()
 
 
+def mes_cdmx() -> str:
+    return datetime.now(ZONA_CDMX).strftime("%Y-%m")
+
+
 def get_connection() -> sqlite3.Connection:
     """
     Abre la base de datos (se crea sola si no existe) y asegura el esquema.
@@ -302,8 +306,9 @@ def registrar_uso(conversation_id, modelo: str, input_tokens: int, output_tokens
 
 def resumen_uso() -> dict:
     """
-    Totales de tokens (todo el histórico y solo hoy en CDMX). El costo se calcula
-    en el endpoint con los precios configurables; aquí solo agregamos tokens.
+    Totales de tokens (todo el histórico, el mes y solo hoy, en CDMX). El costo
+    se calcula en el endpoint con los precios configurables; aquí solo
+    agregamos tokens.
     """
     conn = get_connection()
     try:
@@ -318,6 +323,12 @@ def resumen_uso() -> dict:
             ).fetchone()
             return {"llamadas": fila[0], "input_tokens": fila[1], "output_tokens": fila[2]}
 
-        return {"total": agrega(), "hoy": agrega("WHERE fecha = ?", (hoy_cdmx(),))}
+        return {
+            "total": agrega(),
+            # fecha es TEXT "YYYY-MM-DD" (hoy_cdmx()); los primeros 7 caracteres
+            # son el mes, sin necesitar funciones de fecha de SQLite.
+            "mes": agrega("WHERE substr(fecha, 1, 7) = ?", (mes_cdmx(),)),
+            "hoy": agrega("WHERE fecha = ?", (hoy_cdmx(),)),
+        }
     finally:
         conn.close()

@@ -80,7 +80,7 @@ def health():
 
 @app.get("/uso")
 def uso():
-    """Monitor de gasto: tokens usados (total y hoy) + costo estimado en USD."""
+    """Monitor de gasto: tokens usados (total, mes y hoy) + costo estimado en USD."""
     try:
         datos = resumen_uso()
     except Exception as exc:  # noqa: BLE001
@@ -98,6 +98,7 @@ def uso():
         "precio_input_usd_por_1m": PRECIO_INPUT_USD_POR_1M,
         "precio_output_usd_por_1m": PRECIO_OUTPUT_USD_POR_1M,
         "total": con_costo(datos["total"]),
+        "mes": con_costo(datos["mes"]),
         "hoy": con_costo(datos["hoy"]),
     }
 
