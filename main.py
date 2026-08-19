@@ -20,7 +20,9 @@ from connection import (
     crear_comida,
     eliminar_comida,
     eliminar_consumo,
+    guardar_calorias_quemadas,
     guardar_consumo,
+    listar_calorias_quemadas,
     listar_comidas,
     registrar_uso,
     resumen_uso,
@@ -274,3 +276,33 @@ def eliminar_comida_endpoint(comida_id: int):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
     return {"ok": True}
+
+
+# --- Calorías quemadas: un total por día, alimentado por un Atajo de iOS ------
+class CaloriasQuemadasIn(BaseModel):
+    fecha: str  # "YYYY-MM-DD"
+    calorias: float
+    fuente: str = "atajo_ios"
+
+    @field_validator("fecha")
+    @classmethod
+    def _fecha_valida(cls, v: str) -> str:
+        return _validar_fecha_iso(v)
+
+
+@app.get("/calorias-quemadas")
+def listar_calorias_quemadas_endpoint():
+    """Todas las filas guardadas (una por fecha); el front filtra por día como con /comidas."""
+    try:
+        return listar_calorias_quemadas()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@app.post("/calorias-quemadas")
+def guardar_calorias_quemadas_endpoint(body: CaloriasQuemadasIn):
+    """Upsert por fecha (botón 'Ejecutar Atajo' o automatización desde iOS)."""
+    try:
+        return guardar_calorias_quemadas(body.fecha, body.calorias, body.fuente)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc

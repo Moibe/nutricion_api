@@ -93,6 +93,19 @@ def get_connection() -> sqlite3.Connection:
         )
         """
     )
+    # Calorías quemadas por día (Salud de iPhone vía Atajo, de momento). Una
+    # sola fila por fecha (upsert): el Atajo puede correr varias veces al día
+    # sobre el mismo día y siempre debe reemplazar el total, no sumarlo.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS calorias_quemadas (
+            fecha TEXT PRIMARY KEY,
+            calorias REAL NOT NULL,
+            fuente TEXT NOT NULL DEFAULT 'atajo_ios',
+            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     return conn
 
 
@@ -335,5 +348,43 @@ def resumen_uso() -> dict:
             "mes": agrega("WHERE substr(fecha, 1, 7) = ?", (mes_cdmx(),)),
             "hoy": agrega("WHERE fecha = ?", (hoy_cdmx(),)),
         }
+    finally:
+        conn.close()
+
+
+def guardar_calorias_quemadas(fecha: str, calorias: float, fuente: str = "atajo_ios") -> dict:
+    """
+    Upsert por fecha: el Atajo de iOS puede correr varias veces sobre el
+    mismo día (reintentos, o correrlo manual para probar) y cada corrida ya
+    trae el total acumulado del día completo hasta ese momento — reemplaza,
+    no suma.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO calorias_quemadas (fecha, calorias, fuente)
+            VALUES (?, ?, ?)
+            ON CONFLICT(fecha) DO UPDATE SET
+                calorias = excluded.calorias,
+                fuente = excluded.fuente,
+                actualizado_at = CURRENT_TIMESTAMP
+            """,
+            (fecha, calorias, fuente),
+        )
+        conn.commit()
+        return {"fecha": fecha, "calorias": calorias, "fuente": fuente}
+    finally:
+        conn.close()
+
+
+def listar_calorias_quemadas() -> list[dict]:
+    """Todas las filas guardadas (una por fecha) — el front filtra por día como ya hace con comidas."""
+    conn = get_connection()
+    try:
+        return [
+            {"fecha": f[0], "calorias": f[1], "fuente": f[2]}
+            for f in conn.execute("SELECT fecha, calorias, fuente FROM calorias_quemadas ORDER BY fecha DESC")
+        ]
     finally:
         conn.close()
