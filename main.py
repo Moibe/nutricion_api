@@ -7,11 +7,12 @@ Docs interactivas:  http://127.0.0.1:8000/docs
 """
 
 import os
+from datetime import date
 from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
 from connection import (
@@ -191,16 +192,47 @@ def eliminar_consumo_endpoint(consumo_id: int):
 
 
 # --- Comidas: agrupan varios consumos (botones Desayuno/Colación/Comida/Cena) --
+def _validar_fecha_iso(v: str) -> str:
+    """
+    "YYYY-MM-DD" real (rechaza vacío, formato suelto tipo "2026-8-9" y fechas
+    imposibles tipo "2026-99-99"). Sin esto, un `fecha` mal formado se guarda
+    tal cual: nunca se parsea como fecha real en ningún otro lado del código
+    (solo comparaciones/orden de string), así que no truena nada de inmediato,
+    pero la fila queda "huérfana" — Calendario arma sus días desde un
+    calendario real, no desde `comidas.fecha`, así que esa fila nunca tendría
+    punto ni sería alcanzable dando clic en ningún día.
+    """
+    try:
+        date.fromisoformat(v)
+    except (TypeError, ValueError) as exc:
+        raise ValueError('fecha debe tener formato "YYYY-MM-DD" y ser una fecha real') from exc
+    return v
+
+
 class ComidaIn(BaseModel):
     tipo: Literal["desayuno", "comida", "cena", "colacion"]
     # Posición en la secuencia del día (Desayuno=0, Colación 1=1, Comida=2,
     # Colación 2=3, Cena=4) — la manda el front según el botón que se picó.
     # Separado de `tipo` porque las dos colaciones comparten tipo.
     orden: int = 0
+    # Fecha explícita "YYYY-MM-DD" (botones de /calendario, para crear en el
+    # día elegido en vez de hoy). Si se omite (o se manda null), se crea con
+    # fecha de hoy en CDMX (botones de /hoy).
+    fecha: Optional[str] = None
+
+    @field_validator("fecha")
+    @classmethod
+    def _fecha_valida(cls, v: Optional[str]) -> Optional[str]:
+        return v if v is None else _validar_fecha_iso(v)
 
 
 class FechaIn(BaseModel):
     fecha: str  # "YYYY-MM-DD"
+
+    @field_validator("fecha")
+    @classmethod
+    def _fecha_valida(cls, v: str) -> str:
+        return _validar_fecha_iso(v)
 
 
 @app.get("/comidas")
@@ -214,9 +246,9 @@ def listar_comidas_endpoint():
 
 @app.post("/comidas")
 def crear_comida_endpoint(comida: ComidaIn):
-    """Crea una instancia de comida (fecha = hoy en CDMX por default)."""
+    """Crea una instancia de comida (fecha = hoy en CDMX por default, o la que se mande)."""
     try:
-        return crear_comida(comida.tipo, comida.orden)
+        return crear_comida(comida.tipo, comida.orden, comida.fecha)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo crear la comida: {exc}") from exc
 

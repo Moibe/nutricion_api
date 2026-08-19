@@ -96,13 +96,18 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def crear_comida(tipo: str, orden: int = 0) -> dict:
-    """Crea una instancia de comida (tipo + fecha de hoy en CDMX) y la regresa."""
+def crear_comida(tipo: str, orden: int = 0, fecha: str | None = None) -> dict:
+    """
+    Crea una instancia de comida y la regresa. Sin `fecha` explícita, usa hoy
+    en CDMX (botones de /hoy); con ella, crea directo en ese día (botones de
+    /calendario cuando el día elegido está vacío, para no depender de crear
+    hoy y luego mover la fecha en dos pasos).
+    """
     conn = get_connection()
     try:
         cursor = conn.execute(
             "INSERT INTO comidas (tipo, fecha, orden) VALUES (?, ?, ?)",
-            (tipo, hoy_cdmx(), orden),
+            (tipo, fecha or hoy_cdmx(), orden),
         )
         conn.commit()
         return obtener_comida(conn, cursor.lastrowid)
