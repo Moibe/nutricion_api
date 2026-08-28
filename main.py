@@ -12,7 +12,7 @@ from typing import Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ValidationInfo, field_validator
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
 from connection import (
@@ -20,10 +20,10 @@ from connection import (
     crear_comida,
     eliminar_comida,
     eliminar_consumo,
-    guardar_calorias_quemadas,
     guardar_consumo,
-    listar_calorias_quemadas,
+    guardar_metrica_ios,
     listar_comidas,
+    listar_metricas_ios,
     registrar_uso,
     resumen_uso,
 )
@@ -278,10 +278,20 @@ def eliminar_comida_endpoint(comida_id: int):
     return {"ok": True}
 
 
-# --- Calorías quemadas: un total por día, alimentado por un Atajo de iOS ------
-class CaloriasQuemadasIn(BaseModel):
+# --- Métricas de iOS: un "cachador" genérico para lo que mande el Atajo -------
+# (calorías quemadas, peso, lo que se agregue después). Un valor por
+# (fecha, tipo); el tipo implica la unidad (kcal para calorias_quemadas, kg
+# para peso) — no se guarda unidad aparte porque cada tipo tiene una sola.
+# Tope superior generoso pero real por tipo: un Atajo mal armado (unidad
+# equivocada, automatización duplicada) no debe poder guardar un número
+# absurdo que luego se muestra tal cual en el front sin ningún otro filtro.
+TOPES_METRICA_IOS = {"calorias_quemadas": 20_000.0, "peso": 300.0}
+
+
+class MetricaIosIn(BaseModel):
+    tipo: Literal["calorias_quemadas", "peso"]
     fecha: str  # "YYYY-MM-DD"
-    calorias: float
+    valor: float
     fuente: str = "atajo_ios"
 
     @field_validator("fecha")
@@ -289,20 +299,30 @@ class CaloriasQuemadasIn(BaseModel):
     def _fecha_valida(cls, v: str) -> str:
         return _validar_fecha_iso(v)
 
+    @field_validator("valor")
+    @classmethod
+    def _valor_valido(cls, v: float, info: ValidationInfo) -> float:
+        if v < 0:
+            raise ValueError("valor no puede ser negativo")
+        tope = TOPES_METRICA_IOS.get(info.data.get("tipo"))
+        if tope is not None and v > tope:
+            raise ValueError(f"valor fuera de rango razonable (máximo {tope})")
+        return v
 
-@app.get("/calorias-quemadas")
-def listar_calorias_quemadas_endpoint():
-    """Todas las filas guardadas (una por fecha); el front filtra por día como con /comidas."""
+
+@app.get("/metricas-ios")
+def listar_metricas_ios_endpoint():
+    """Todas las filas guardadas; el front filtra por tipo y por día como con /comidas."""
     try:
-        return listar_calorias_quemadas()
+        return listar_metricas_ios()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
-@app.post("/calorias-quemadas")
-def guardar_calorias_quemadas_endpoint(body: CaloriasQuemadasIn):
-    """Upsert por fecha (botón 'Ejecutar Atajo' o automatización desde iOS)."""
+@app.post("/metricas-ios")
+def guardar_metrica_ios_endpoint(body: MetricaIosIn):
+    """Upsert por (fecha, tipo) — lo que mande el Atajo de iOS (calorías quemadas, peso, ...)."""
     try:
-        return guardar_calorias_quemadas(body.fecha, body.calorias, body.fuente)
+        return guardar_metrica_ios(body.tipo, body.fecha, body.valor, body.fuente)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc

@@ -93,16 +93,30 @@ def get_connection() -> sqlite3.Connection:
         )
         """
     )
-    # Calorías quemadas por día (Salud de iPhone vía Atajo, de momento). Una
-    # sola fila por fecha (upsert): el Atajo puede correr varias veces al día
-    # sobre el mismo día y siempre debe reemplazar el total, no sumarlo.
+    # Tabla anterior de un solo metric (solo calorías quemadas), reemplazada
+    # por metricas_ios de abajo, genérica para varios tipos de dato de iOS
+    # (calorías quemadas, peso, lo que se agregue después). Nunca llegó a
+    # tener datos reales en producción, así que se puede tirar sin migrar nada.
+    # Guardado con el mismo patrón que las demás migraciones in-place de este
+    # archivo (solo corre de verdad una vez, no en cada apertura de conexión).
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calorias_quemadas'"
+    ).fetchone():
+        conn.execute("DROP TABLE calorias_quemadas")
+    # Métricas que manda un Atajo de iOS (Salud → nuestra API): una fila por
+    # (fecha, tipo) — upsert, porque el Atajo puede correr varias veces al día
+    # sobre el mismo día y siempre debe reemplazar el valor, no sumarlo.
+    # `tipo` distingue qué es `valor` (unidad implícita por tipo: kcal para
+    # calorias_quemadas, kg para peso).
     conn.execute(
         """
-        CREATE TABLE IF NOT EXISTS calorias_quemadas (
-            fecha TEXT PRIMARY KEY,
-            calorias REAL NOT NULL,
+        CREATE TABLE IF NOT EXISTS metricas_ios (
+            fecha TEXT NOT NULL,
+            tipo TEXT NOT NULL CHECK (tipo IN ('calorias_quemadas', 'peso')),
+            valor REAL NOT NULL,
             fuente TEXT NOT NULL DEFAULT 'atajo_ios',
-            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (fecha, tipo)
         )
         """
     )
@@ -352,39 +366,40 @@ def resumen_uso() -> dict:
         conn.close()
 
 
-def guardar_calorias_quemadas(fecha: str, calorias: float, fuente: str = "atajo_ios") -> dict:
+def guardar_metrica_ios(tipo: str, fecha: str, valor: float, fuente: str = "atajo_ios") -> dict:
     """
-    Upsert por fecha: el Atajo de iOS puede correr varias veces sobre el
-    mismo día (reintentos, o correrlo manual para probar) y cada corrida ya
-    trae el total acumulado del día completo hasta ese momento — reemplaza,
-    no suma.
+    Upsert por (fecha, tipo): el Atajo de iOS puede correr varias veces sobre
+    el mismo día (reintentos, o correrlo manual para probar) y cada corrida
+    ya trae el valor del día completo hasta ese momento — reemplaza, no suma.
     """
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO calorias_quemadas (fecha, calorias, fuente)
-            VALUES (?, ?, ?)
-            ON CONFLICT(fecha) DO UPDATE SET
-                calorias = excluded.calorias,
+            INSERT INTO metricas_ios (fecha, tipo, valor, fuente)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(fecha, tipo) DO UPDATE SET
+                valor = excluded.valor,
                 fuente = excluded.fuente,
                 actualizado_at = CURRENT_TIMESTAMP
             """,
-            (fecha, calorias, fuente),
+            (fecha, tipo, valor, fuente),
         )
         conn.commit()
-        return {"fecha": fecha, "calorias": calorias, "fuente": fuente}
+        return {"fecha": fecha, "tipo": tipo, "valor": valor, "fuente": fuente}
     finally:
         conn.close()
 
 
-def listar_calorias_quemadas() -> list[dict]:
-    """Todas las filas guardadas (una por fecha) — el front filtra por día como ya hace con comidas."""
+def listar_metricas_ios() -> list[dict]:
+    """Todas las filas guardadas — el front filtra por tipo y por día como ya hace con comidas."""
     conn = get_connection()
     try:
         return [
-            {"fecha": f[0], "calorias": f[1], "fuente": f[2]}
-            for f in conn.execute("SELECT fecha, calorias, fuente FROM calorias_quemadas ORDER BY fecha DESC")
+            {"fecha": f[0], "tipo": f[1], "valor": f[2], "fuente": f[3]}
+            for f in conn.execute(
+                "SELECT fecha, tipo, valor, fuente FROM metricas_ios ORDER BY fecha DESC"
+            )
         ]
     finally:
         conn.close()
