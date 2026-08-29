@@ -296,6 +296,9 @@ class MetricaIosIn(BaseModel):
     fecha: str  # "YYYY-MM-DD"
     valor: float
     fuente: str = "atajo_ios"
+    # Descripción libre ("Correr 5km", "Pesas") — opcional porque el Atajo de
+    # iOS nunca la manda, solo la captura manual de /ejercicio.
+    concepto: Optional[str] = None
 
     @field_validator("fecha")
     @classmethod
@@ -326,7 +329,7 @@ def listar_metricas_ios_endpoint():
 def guardar_metrica_ios_endpoint(body: MetricaIosIn):
     """Upsert por (fecha, tipo) — lo que mande el Atajo de iOS (calorías quemadas, peso, ...)."""
     try:
-        return guardar_metrica_ios(body.tipo, body.fecha, body.valor, body.fuente)
+        return guardar_metrica_ios(body.tipo, body.fecha, body.valor, body.fuente, body.concepto)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 

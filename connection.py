@@ -107,19 +107,27 @@ def get_connection() -> sqlite3.Connection:
     # (fecha, tipo) — upsert, porque el Atajo puede correr varias veces al día
     # sobre el mismo día y siempre debe reemplazar el valor, no sumarlo.
     # `tipo` distingue qué es `valor` (unidad implícita por tipo: kcal para
-    # calorias_quemadas, kg para peso).
+    # calorias_quemadas, kg para peso). `concepto` es opcional (nullable):
+    # solo lo manda la captura manual de /ejercicio ("Correr 5km", "Pesas"...)
+    # — el Atajo de iOS solo conoce el número, no una descripción, así que
+    # nunca lo manda y no debe ser obligatorio o le rompería el POST.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS metricas_ios (
             fecha TEXT NOT NULL,
             tipo TEXT NOT NULL CHECK (tipo IN ('calorias_quemadas', 'peso')),
             valor REAL NOT NULL,
+            concepto TEXT,
             fuente TEXT NOT NULL DEFAULT 'atajo_ios',
             actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (fecha, tipo)
         )
         """
     )
+    # Migración in-place para bases creadas antes de que existiera concepto.
+    columnas_metricas = {fila[1] for fila in conn.execute("PRAGMA table_info(metricas_ios)")}
+    if "concepto" not in columnas_metricas:
+        conn.execute("ALTER TABLE metricas_ios ADD COLUMN concepto TEXT")
     # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
     # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
     # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
@@ -381,27 +389,39 @@ def resumen_uso() -> dict:
         conn.close()
 
 
-def guardar_metrica_ios(tipo: str, fecha: str, valor: float, fuente: str = "atajo_ios") -> dict:
+def guardar_metrica_ios(
+    tipo: str, fecha: str, valor: float, fuente: str = "atajo_ios", concepto: str | None = None
+) -> dict:
     """
     Upsert por (fecha, tipo): el Atajo de iOS puede correr varias veces sobre
     el mismo día (reintentos, o correrlo manual para probar) y cada corrida
     ya trae el valor del día completo hasta ese momento — reemplaza, no suma.
+
+    `concepto` usa COALESCE en el UPDATE: si esta llamada no lo manda (el
+    Atajo de iOS nunca lo hace, solo la captura manual), se conserva el que
+    ya hubiera en vez de borrarlo — así el Atajo actualizando el número no
+    pisa una descripción que ya habías escrito a mano.
     """
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO metricas_ios (fecha, tipo, valor, fuente)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO metricas_ios (fecha, tipo, valor, fuente, concepto)
+            VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(fecha, tipo) DO UPDATE SET
                 valor = excluded.valor,
                 fuente = excluded.fuente,
+                concepto = COALESCE(excluded.concepto, metricas_ios.concepto),
                 actualizado_at = CURRENT_TIMESTAMP
             """,
-            (fecha, tipo, valor, fuente),
+            (fecha, tipo, valor, fuente, concepto),
         )
         conn.commit()
-        return {"fecha": fecha, "tipo": tipo, "valor": valor, "fuente": fuente}
+        fila = conn.execute(
+            "SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios WHERE fecha = ? AND tipo = ?",
+            (fecha, tipo),
+        ).fetchone()
+        return {"fecha": fila[0], "tipo": fila[1], "valor": fila[2], "fuente": fila[3], "concepto": fila[4]}
     finally:
         conn.close()
 
@@ -411,9 +431,9 @@ def listar_metricas_ios() -> list[dict]:
     conn = get_connection()
     try:
         return [
-            {"fecha": f[0], "tipo": f[1], "valor": f[2], "fuente": f[3]}
+            {"fecha": f[0], "tipo": f[1], "valor": f[2], "fuente": f[3], "concepto": f[4]}
             for f in conn.execute(
-                "SELECT fecha, tipo, valor, fuente FROM metricas_ios ORDER BY fecha DESC"
+                "SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios ORDER BY fecha DESC"
             )
         ]
     finally:
