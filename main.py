@@ -22,8 +22,11 @@ from connection import (
     eliminar_consumo,
     guardar_consumo,
     guardar_metrica_ios,
+    guardar_perfil,
+    hoy_cdmx,
     listar_comidas,
     listar_metricas_ios,
+    obtener_perfil,
     registrar_uso,
     resumen_uso,
 )
@@ -324,5 +327,48 @@ def guardar_metrica_ios_endpoint(body: MetricaIosIn):
     """Upsert por (fecha, tipo) — lo que mande el Atajo de iOS (calorías quemadas, peso, ...)."""
     try:
         return guardar_metrica_ios(body.tipo, body.fecha, body.valor, body.fuente)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+# --- Perfil: fecha de nacimiento/estatura/sexo, para calcular metabolismo ----
+# basal (Mifflin-St Jeor) en el front junto al peso del día. Una sola fila
+# (app de un solo usuario) — fecha_nacimiento en vez de "edad" porque la edad
+# cambia con el tiempo; se calcula al vuelo con la fecha de hoy.
+class PerfilIn(BaseModel):
+    fecha_nacimiento: str  # "YYYY-MM-DD"
+    estatura_cm: float
+    sexo: Literal["hombre", "mujer"]
+
+    @field_validator("fecha_nacimiento")
+    @classmethod
+    def _fecha_nacimiento_valida(cls, v: str) -> str:
+        v = _validar_fecha_iso(v)
+        if v > hoy_cdmx():
+            raise ValueError("fecha_nacimiento no puede ser en el futuro")
+        return v
+
+    @field_validator("estatura_cm")
+    @classmethod
+    def _estatura_valida(cls, v: float) -> float:
+        if not (50 <= v <= 250):
+            raise ValueError("estatura_cm fuera de rango razonable (50-250)")
+        return v
+
+
+@app.get("/perfil")
+def obtener_perfil_endpoint():
+    """None si todavía no se ha capturado (primera vez que se usa la app)."""
+    try:
+        return obtener_perfil()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo leer el perfil: {exc}") from exc
+
+
+@app.post("/perfil")
+def guardar_perfil_endpoint(body: PerfilIn):
+    """Upsert del perfil (fecha_nacimiento/estatura/sexo)."""
+    try:
+        return guardar_perfil(body.fecha_nacimiento, body.estatura_cm, body.sexo)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc

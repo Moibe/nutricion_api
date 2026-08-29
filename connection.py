@@ -120,6 +120,21 @@ def get_connection() -> sqlite3.Connection:
         )
         """
     )
+    # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
+    # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
+    # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
+    # viejo; se calcula al vuelo cada vez que se necesita.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS perfil (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            fecha_nacimiento TEXT NOT NULL,
+            estatura_cm REAL NOT NULL,
+            sexo TEXT NOT NULL CHECK (sexo IN ('hombre', 'mujer')),
+            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     return conn
 
 
@@ -401,5 +416,41 @@ def listar_metricas_ios() -> list[dict]:
                 "SELECT fecha, tipo, valor, fuente FROM metricas_ios ORDER BY fecha DESC"
             )
         ]
+    finally:
+        conn.close()
+
+
+def guardar_perfil(fecha_nacimiento: str, estatura_cm: float, sexo: str) -> dict:
+    """Upsert de la única fila de perfil (id=1) — app de un solo usuario."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO perfil (id, fecha_nacimiento, estatura_cm, sexo)
+            VALUES (1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                fecha_nacimiento = excluded.fecha_nacimiento,
+                estatura_cm = excluded.estatura_cm,
+                sexo = excluded.sexo,
+                actualizado_at = CURRENT_TIMESTAMP
+            """,
+            (fecha_nacimiento, estatura_cm, sexo),
+        )
+        conn.commit()
+        return {"fecha_nacimiento": fecha_nacimiento, "estatura_cm": estatura_cm, "sexo": sexo}
+    finally:
+        conn.close()
+
+
+def obtener_perfil() -> dict | None:
+    """None si todavía no se ha capturado el perfil (primera vez)."""
+    conn = get_connection()
+    try:
+        fila = conn.execute(
+            "SELECT fecha_nacimiento, estatura_cm, sexo FROM perfil WHERE id = 1"
+        ).fetchone()
+        if fila is None:
+            return None
+        return {"fecha_nacimiento": fila[0], "estatura_cm": fila[1], "sexo": fila[2]}
     finally:
         conn.close()
