@@ -241,10 +241,20 @@ class FechaIn(BaseModel):
 
 
 @app.get("/comidas")
-def listar_comidas_endpoint():
-    """Lista las comidas con al menos un consumo guardado, con sus consumos anidados."""
+def listar_comidas_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
+    """
+    Lista las comidas con al menos un consumo guardado, con sus consumos
+    anidados. desde/hasta ("YYYY-MM-DD", opcionales): acotan por rango de
+    fecha inclusivo — los usa /registro-diario para pedir un mes a la vez.
+    """
     try:
-        return listar_comidas()
+        if desde is not None:
+            desde = _validar_fecha_iso(desde)
+        if hasta is not None:
+            hasta = _validar_fecha_iso(hasta)
+        return listar_comidas(desde, hasta)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
@@ -317,10 +327,20 @@ class MetricaIosIn(BaseModel):
 
 
 @app.get("/metricas-ios")
-def listar_metricas_ios_endpoint():
-    """Todas las filas guardadas; el front filtra por tipo y por día como con /comidas."""
+def listar_metricas_ios_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
+    """
+    Todas las filas guardadas; el front filtra por tipo y por día como con
+    /comidas. desde/hasta ("YYYY-MM-DD", opcionales): mismo acotado por rango
+    inclusivo que /comidas, para /registro-diario.
+    """
     try:
-        return listar_metricas_ios()
+        if desde is not None:
+            desde = _validar_fecha_iso(desde)
+        if hasta is not None:
+            hasta = _validar_fecha_iso(hasta)
+        return listar_metricas_ios(desde, hasta)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 

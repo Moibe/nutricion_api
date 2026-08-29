@@ -221,7 +221,7 @@ def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
     return {"id": fila[0], "tipo": fila[1], "fecha": fila[2], "orden": fila[3], "created_at": fila[4]}
 
 
-def listar_comidas() -> list[dict]:
+def listar_comidas(desde: str | None = None, hasta: str | None = None) -> list[dict]:
     """
     Lista las comidas GUARDADAS (con al menos un consumo asociado), cada una
     con sus consumos anidados. Las comidas vacías (se creó la instancia con el
@@ -229,9 +229,22 @@ def listar_comidas() -> list[dict]:
     información nutricional. Orden: día más reciente primero; dentro del
     mismo día, en la secuencia en que se comen (orden ASC — Desayuno,
     Colación 1, Comida, Colación 2, Cena), no por cuándo se guardaron.
+
+    desde/hasta ("YYYY-MM-DD", opcionales, inclusivos): acotan por c.fecha —
+    usado por /registro-diario para pedir solo un mes en vez de todo el
+    historial en cada carga. None = sin ese límite (comportamiento de siempre).
     """
     conn = get_connection()
     try:
+        condiciones = []
+        params: list = []
+        if desde is not None:
+            condiciones.append("c.fecha >= ?")
+            params.append(desde)
+        if hasta is not None:
+            condiciones.append("c.fecha <= ?")
+            params.append(hasta)
+        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
         comidas = [
             {
                 "id": f[0],
@@ -242,12 +255,14 @@ def listar_comidas() -> list[dict]:
                 "consumos": [],
             }
             for f in conn.execute(
-                """
+                f"""
                 SELECT DISTINCT c.id, c.tipo, c.fecha, c.orden, c.created_at
                 FROM comidas c
                 JOIN consumos x ON x.comida_id = c.id
+                {where}
                 ORDER BY c.fecha DESC, c.orden ASC, c.id ASC
-                """
+                """,
+                params,
             )
         ]
         por_id = {c["id"]: c for c in comidas}
@@ -426,14 +441,28 @@ def guardar_metrica_ios(
         conn.close()
 
 
-def listar_metricas_ios() -> list[dict]:
-    """Todas las filas guardadas — el front filtra por tipo y por día como ya hace con comidas."""
+def listar_metricas_ios(desde: str | None = None, hasta: str | None = None) -> list[dict]:
+    """
+    Todas las filas guardadas — el front filtra por tipo y por día como ya
+    hace con comidas. desde/hasta ("YYYY-MM-DD", opcionales, inclusivos):
+    mismo acotado por rango que listar_comidas, para /registro-diario.
+    """
     conn = get_connection()
     try:
+        condiciones = []
+        params: list = []
+        if desde is not None:
+            condiciones.append("fecha >= ?")
+            params.append(desde)
+        if hasta is not None:
+            condiciones.append("fecha <= ?")
+            params.append(hasta)
+        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
         return [
             {"fecha": f[0], "tipo": f[1], "valor": f[2], "fuente": f[3], "concepto": f[4]}
             for f in conn.execute(
-                "SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios ORDER BY fecha DESC"
+                f"SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios {where} ORDER BY fecha DESC",
+                params,
             )
         ]
     finally:
