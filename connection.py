@@ -128,6 +128,23 @@ def get_connection() -> sqlite3.Connection:
     columnas_metricas = {fila[1] for fila in conn.execute("PRAGMA table_info(metricas_ios)")}
     if "concepto" not in columnas_metricas:
         conn.execute("ALTER TABLE metricas_ios ADD COLUMN concepto TEXT")
+    # Ejercicio manual: BITÁCORA, no un solo valor por día — cada "Guardar" de
+    # /ejercicio agrega una fila (mismo espíritu que comidas/consumos: varios
+    # renglones que se suman a un total del día), a diferencia de
+    # metricas_ios (upsert de un solo valor por fecha+tipo, que sigue siendo
+    # exclusivo del Atajo de iOS). "kcal quemadas" mostradas en el resto de la
+    # app = suma de esta tabla + el valor de metricas_ios, cuando exista.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ejercicios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            fecha TEXT NOT NULL,
+            concepto TEXT NOT NULL,
+            kilocalorias REAL NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
     # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
     # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
@@ -465,6 +482,64 @@ def listar_metricas_ios(desde: str | None = None, hasta: str | None = None) -> l
                 params,
             )
         ]
+    finally:
+        conn.close()
+
+
+def crear_ejercicio(fecha: str, concepto: str, kilocalorias: float) -> dict:
+    """Agrega una entrada de ejercicio (bitácora — no reemplaza las anteriores del día)."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO ejercicios (fecha, concepto, kilocalorias) VALUES (?, ?, ?)",
+            (fecha, concepto, kilocalorias),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return {"id": fila[0], "fecha": fila[1], "concepto": fila[2], "kilocalorias": fila[3], "created_at": fila[4]}
+    finally:
+        conn.close()
+
+
+def listar_ejercicios(desde: str | None = None, hasta: str | None = None) -> list[dict]:
+    """
+    Todas las entradas de ejercicio guardadas, día más reciente primero.
+    desde/hasta ("YYYY-MM-DD", opcionales, inclusivos): mismo acotado por
+    rango que listar_comidas/listar_metricas_ios, para /registro-diario.
+    """
+    conn = get_connection()
+    try:
+        condiciones = []
+        params: list = []
+        if desde is not None:
+            condiciones.append("fecha >= ?")
+            params.append(desde)
+        if hasta is not None:
+            condiciones.append("fecha <= ?")
+            params.append(hasta)
+        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+        return [
+            {"id": f[0], "fecha": f[1], "concepto": f[2], "kilocalorias": f[3], "created_at": f[4]}
+            for f in conn.execute(
+                f"SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios {where} ORDER BY fecha DESC, id ASC",
+                params,
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def eliminar_ejercicio(ejercicio_id: int) -> None:
+    """Borra una entrada de ejercicio (botón de eliminar de la bitácora)."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute("DELETE FROM ejercicios WHERE id = ?", (ejercicio_id,))
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el ejercicio {ejercicio_id}")
+        conn.commit()
     finally:
         conn.close()
 

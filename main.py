@@ -18,13 +18,16 @@ from asistente import INSTRUCCIONES, MODELO, crear_cliente
 from connection import (
     actualizar_fecha_comida,
     crear_comida,
+    crear_ejercicio,
     eliminar_comida,
     eliminar_consumo,
+    eliminar_ejercicio,
     guardar_consumo,
     guardar_metrica_ios,
     guardar_perfil,
     hoy_cdmx,
     listar_comidas,
+    listar_ejercicios,
     listar_metricas_ios,
     obtener_perfil,
     registrar_uso,
@@ -352,6 +355,81 @@ def guardar_metrica_ios_endpoint(body: MetricaIosIn):
         return guardar_metrica_ios(body.tipo, body.fecha, body.valor, body.fuente, body.concepto)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+# --- Ejercicio manual: bitácora (varias entradas por día, no un solo valor) --
+# A diferencia de metricas_ios (upsert, un valor por fecha+tipo, exclusivo del
+# Atajo de iOS), cada "Guardar" de /ejercicio agrega una fila nueva — mismo
+# espíritu que comidas/consumos.
+TOPE_KCAL_EJERCICIO = 20_000.0
+
+
+class EjercicioIn(BaseModel):
+    fecha: str  # "YYYY-MM-DD"
+    concepto: str
+    kilocalorias: float
+
+    @field_validator("fecha")
+    @classmethod
+    def _fecha_valida(cls, v: str) -> str:
+        return _validar_fecha_iso(v)
+
+    @field_validator("concepto")
+    @classmethod
+    def _concepto_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("concepto no puede estar vacío")
+        return v
+
+    @field_validator("kilocalorias")
+    @classmethod
+    def _kilocalorias_validas(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("kilocalorias no puede ser negativo")
+        if v > TOPE_KCAL_EJERCICIO:
+            raise ValueError(f"kilocalorias fuera de rango razonable (máximo {TOPE_KCAL_EJERCICIO})")
+        return v
+
+
+@app.get("/ejercicios")
+def listar_ejercicios_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
+    """
+    Lista la bitácora de ejercicio manual. desde/hasta ("YYYY-MM-DD",
+    opcionales): mismo acotado por rango inclusivo que /comidas, para
+    /registro-diario.
+    """
+    try:
+        if desde is not None:
+            desde = _validar_fecha_iso(desde)
+        if hasta is not None:
+            hasta = _validar_fecha_iso(hasta)
+        return listar_ejercicios(desde, hasta)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@app.post("/ejercicios")
+def crear_ejercicio_endpoint(ejercicio: EjercicioIn):
+    """Agrega una entrada a la bitácora de ejercicio (botón Guardar de /ejercicio)."""
+    try:
+        return crear_ejercicio(ejercicio.fecha, ejercicio.concepto, ejercicio.kilocalorias)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+@app.delete("/ejercicios/{ejercicio_id}")
+def eliminar_ejercicio_endpoint(ejercicio_id: int):
+    """Borra una entrada de la bitácora de ejercicio."""
+    try:
+        eliminar_ejercicio(ejercicio_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
+    return {"ok": True}
 
 
 # --- Perfil: fecha de nacimiento/estatura/sexo, para calcular metabolismo ----
