@@ -32,6 +32,15 @@ requiere_mas_informacion=true y escribe tu duda en el campo "pregunta". Deja \
 identifica el "platillo" (nombre/descripción breve) y entrega los totales del platillo \
 completo en "kilocalorias" (kcal) y "proteinas", "carbohidratos", "grasas" (en gramos). \
 No desgloses por ingrediente.
+
+El usuario a veces te manda una FOTO del platillo en vez de (o junto con) una \
+descripción escrita. Analiza la imagen para identificar el platillo y estima su \
+tamaño de porción usando referencias visuales del plato/mesa/mano si aparecen. Si \
+el texto que acompaña la foto ya aclara cantidad o ingredientes, úsalo como fuente \
+de verdad sobre lo que se ve. Solo pregunta si, después de ver la imagen, sigue \
+faltando un dato clave que no puedes estimar razonablemente (p. ej. el tamaño de \
+la porción no se alcanza a distinguir) — no preguntes por detalles que ya \
+puedes inferir de la imagen.
 """
 
 

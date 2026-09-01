@@ -62,8 +62,13 @@ app.add_middleware(
 
 
 # --- Modelos de la API HTTP ---------------------------------------------------
+# Tope al tamaño del data URI (base64) de una foto — generoso para una foto de
+# celular ya comprimida por el navegador, pero evita payloads descomunales.
+TOPE_IMAGEN_BASE64_CHARS = 12_000_000  # ~9 MB decodificados
+
+
 class ChatRequest(BaseModel):
-    mensaje: str
+    mensaje: str = ""
     # En el primer turno se omite; luego se reenvía el de la respuesta anterior
     # para mantener el hilo (equivale al thread_id de la Assistants API).
     conversation_id: Optional[str] = None
@@ -71,6 +76,20 @@ class ChatRequest(BaseModel):
     # (platillo + macros). Se inyecta en el primer turno para que el asistente
     # sepa qué está editando aunque el hilo de OpenAI ya no tenga ese contexto.
     contexto: Optional[str] = None
+    # Foto del platillo, como data URI (data:image/jpeg;base64,...) — opcional,
+    # se puede mandar sola o junto con mensaje.
+    imagen_base64: Optional[str] = None
+
+    @field_validator("imagen_base64")
+    @classmethod
+    def _imagen_valida(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not v.startswith("data:image/"):
+            raise ValueError("imagen_base64 debe ser un data URI (data:image/...)")
+        if len(v) > TOPE_IMAGEN_BASE64_CHARS:
+            raise ValueError("Imagen demasiado grande")
+        return v
 
 
 class ChatResponse(BaseModel):
@@ -125,6 +144,9 @@ def chat(req: ChatRequest):
        usuario y el schema estructurado. Al pasar `conversation`, OpenAI guarda
        e incluye automáticamente el historial — no hay que reenviar mensajes.
     """
+    if not req.mensaje.strip() and not req.imagen_base64:
+        raise HTTPException(status_code=422, detail="Falta mensaje o imagen.")
+
     conversation_id = req.conversation_id
     if conversation_id is None:
         conversation = client.conversations.create()
@@ -141,12 +163,24 @@ def chat(req: ChatRequest):
             "entrega el resultado final actualizado."
         )
 
+    # Con foto: input multimodal (Responses API) — texto opcional + imagen.
+    # Sin foto: se manda el string plano de siempre.
+    entrada_final: object = entrada
+    if req.imagen_base64:
+        contenido: list[dict] = []
+        if entrada.strip():
+            contenido.append({"type": "input_text", "text": entrada})
+        contenido.append(
+            {"type": "input_image", "image_url": req.imagen_base64, "detail": "auto"}
+        )
+        entrada_final = [{"role": "user", "content": contenido}]
+
     try:
         response = client.responses.parse(
             model=MODELO,
             conversation=conversation_id,
             instructions=INSTRUCCIONES,
-            input=entrada,
+            input=entrada_final,
             text_format=RespuestaKilocalculator,
             temperature=1.0,
         )
