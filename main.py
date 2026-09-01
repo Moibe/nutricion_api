@@ -19,15 +19,18 @@ from connection import (
     actualizar_fecha_comida,
     crear_comida,
     crear_ejercicio,
+    crear_favorito,
     eliminar_comida,
     eliminar_consumo,
     eliminar_ejercicio,
+    eliminar_favorito,
     guardar_consumo,
     guardar_metrica_ios,
     guardar_perfil,
     hoy_cdmx,
     listar_comidas,
     listar_ejercicios,
+    listar_favoritos,
     listar_metricas_ios,
     obtener_perfil,
     registrar_uso,
@@ -425,6 +428,57 @@ def eliminar_ejercicio_endpoint(ejercicio_id: int):
     """Borra una entrada de la bitácora de ejercicio."""
     try:
         eliminar_ejercicio(ejercicio_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
+    return {"ok": True}
+
+
+# --- Favoritos: platillos ya calculados por la IA que el usuario guarda -------
+# para reusar con un tap (POST directo a /consumos, sin pasar por /chat), sin
+# volver a describirlos ni gastar otra llamada al modelo.
+class FavoritoIn(BaseModel):
+    nombre: str
+    kilocalorias: Optional[float] = None
+    proteinas: Optional[float] = None
+    carbohidratos: Optional[float] = None
+    grasas: Optional[float] = None
+
+    @field_validator("nombre")
+    @classmethod
+    def _nombre_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("nombre no puede estar vacío")
+        return v
+
+
+@app.get("/favoritos")
+def listar_favoritos_endpoint():
+    """Lista de platillos guardados para reuso rápido en el chat."""
+    try:
+        return listar_favoritos()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@app.post("/favoritos")
+def crear_favorito_endpoint(favorito: FavoritoIn):
+    """Guarda un platillo (botón "Guardar como frecuente" del chat)."""
+    try:
+        return crear_favorito(
+            favorito.nombre, favorito.kilocalorias, favorito.proteinas, favorito.carbohidratos, favorito.grasas
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+@app.delete("/favoritos/{favorito_id}")
+def eliminar_favorito_endpoint(favorito_id: int):
+    """Borra un favorito de la lista rápida."""
+    try:
+        eliminar_favorito(favorito_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

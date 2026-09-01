@@ -145,6 +145,22 @@ def get_connection() -> sqlite3.Connection:
         )
         """
     )
+    # Favoritos: platillos que el usuario decide "recordar" con sus macros ya
+    # calculados por la IA, para reusarlos después con un tap (POST directo a
+    # /consumos) en vez de volver a describirlos y gastar otra llamada.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS favoritos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nombre TEXT NOT NULL,
+            kilocalorias REAL,
+            proteinas REAL,
+            carbohidratos REAL,
+            grasas REAL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
     # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
     # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
     # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
@@ -539,6 +555,73 @@ def eliminar_ejercicio(ejercicio_id: int) -> None:
         cursor = conn.execute("DELETE FROM ejercicios WHERE id = ?", (ejercicio_id,))
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el ejercicio {ejercicio_id}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def crear_favorito(
+    nombre: str,
+    kilocalorias: float | None,
+    proteinas: float | None,
+    carbohidratos: float | None,
+    grasas: float | None,
+) -> dict:
+    """Guarda un platillo (con sus macros ya calculados) para reusar sin IA."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO favoritos (nombre, kilocalorias, proteinas, carbohidratos, grasas) VALUES (?, ?, ?, ?, ?)",
+            (nombre, kilocalorias, proteinas, carbohidratos, grasas),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, nombre, kilocalorias, proteinas, carbohidratos, grasas, created_at FROM favoritos WHERE id = ?",
+            (cursor.lastrowid,),
+        ).fetchone()
+        return {
+            "id": fila[0],
+            "nombre": fila[1],
+            "kilocalorias": fila[2],
+            "proteinas": fila[3],
+            "carbohidratos": fila[4],
+            "grasas": fila[5],
+            "created_at": fila[6],
+        }
+    finally:
+        conn.close()
+
+
+def listar_favoritos() -> list[dict]:
+    """Todos los favoritos guardados, más reciente primero."""
+    conn = get_connection()
+    try:
+        return [
+            {
+                "id": f[0],
+                "nombre": f[1],
+                "kilocalorias": f[2],
+                "proteinas": f[3],
+                "carbohidratos": f[4],
+                "grasas": f[5],
+                "created_at": f[6],
+            }
+            for f in conn.execute(
+                "SELECT id, nombre, kilocalorias, proteinas, carbohidratos, grasas, created_at "
+                "FROM favoritos ORDER BY id DESC"
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def eliminar_favorito(favorito_id: int) -> None:
+    """Borra un favorito (ya no aparece en la lista rápida del chat)."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute("DELETE FROM favoritos WHERE id = ?", (favorito_id,))
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el favorito {favorito_id}")
         conn.commit()
     finally:
         conn.close()
