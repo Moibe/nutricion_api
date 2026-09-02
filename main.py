@@ -280,6 +280,9 @@ def crear_consumo(consumo: ConsumoIn):
     """Upsert (por conversation_id) del platillo final que el usuario decidió guardar."""
     try:
         return guardar_consumo(consumo.conversation_id, consumo)
+    except ValueError as exc:
+        # comida_id que no existe, o que existe pero es de otro usuario.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — feedback de guardado al usuario
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 

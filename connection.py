@@ -207,29 +207,35 @@ def crear_comida(tipo: str, orden: int = 0, fecha: str | None = None) -> dict:
     /calendario cuando el día elegido está vacío, para no depender de crear
     hoy y luego mover la fecha en dos pasos).
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO comidas (tipo, fecha, orden) VALUES (?, ?, ?)",
-            (tipo, fecha or hoy_cdmx(), orden),
+            "INSERT INTO comidas (usuario_id, tipo, fecha, orden) VALUES (?, ?, ?, ?)",
+            (usuario_id, tipo, fecha or hoy_cdmx(), orden),
         )
         conn.commit()
-        return obtener_comida(conn, cursor.lastrowid)
+        return obtener_comida(conn, cursor.lastrowid, usuario_id)
     finally:
         conn.close()
 
 
 def actualizar_fecha_comida(comida_id: int, fecha: str) -> dict:
     """Cambia la fecha de una comida existente (botón de calendario del front)."""
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "UPDATE comidas SET fecha = ? WHERE id = ?", (fecha, comida_id)
+            "UPDATE comidas SET fecha = ? WHERE id = ? AND usuario_id = ?", (fecha, comida_id, usuario_id)
         )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe la comida {comida_id}")
         conn.commit()
-        return obtener_comida(conn, comida_id)
+        return obtener_comida(conn, comida_id, usuario_id)
     finally:
         conn.close()
 
@@ -240,9 +246,13 @@ def eliminar_consumo(consumo_id: int) -> None:
     comida, la comida queda vacía y simplemente deja de aparecer en el listado
     (listar_comidas hace JOIN con consumos) — no se borra la fila `comidas`.
     """
+    from auth import uid
+
     conn = get_connection()
     try:
-        cursor = conn.execute("DELETE FROM consumos WHERE id = ?", (consumo_id,))
+        cursor = conn.execute(
+            "DELETE FROM consumos WHERE id = ? AND usuario_id = ?", (consumo_id, uid())
+        )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el consumo {consumo_id}")
         conn.commit()
@@ -256,11 +266,23 @@ def eliminar_comida(comida_id: int) -> None:
     la tarjeta, a diferencia de eliminar_consumo que solo quita un consumo y
     puede dejar la comida vacía sin borrar su fila). Se borran los consumos
     primero porque la FK consumos.comida_id no tiene ON DELETE CASCADE.
+
+    Ambos DELETE llevan `AND usuario_id = ?` — sin eso, alguien que adivinara
+    el id de una comida AJENA podría borrar los consumos de esa comida en el
+    primer DELETE (que solo filtraba por comida_id) antes de que el segundo
+    DELETE (sobre comidas) fallara por no encontrarla.
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
-        conn.execute("DELETE FROM consumos WHERE comida_id = ?", (comida_id,))
-        cursor = conn.execute("DELETE FROM comidas WHERE id = ?", (comida_id,))
+        conn.execute(
+            "DELETE FROM consumos WHERE comida_id = ? AND usuario_id = ?", (comida_id, usuario_id)
+        )
+        cursor = conn.execute(
+            "DELETE FROM comidas WHERE id = ? AND usuario_id = ?", (comida_id, usuario_id)
+        )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe la comida {comida_id}")
         conn.commit()
@@ -268,9 +290,10 @@ def eliminar_comida(comida_id: int) -> None:
         conn.close()
 
 
-def obtener_comida(conn: sqlite3.Connection, comida_id: int) -> dict:
+def obtener_comida(conn: sqlite3.Connection, comida_id: int, usuario_id: int) -> dict:
     fila = conn.execute(
-        "SELECT id, tipo, fecha, orden, created_at FROM comidas WHERE id = ?", (comida_id,)
+        "SELECT id, tipo, fecha, orden, created_at FROM comidas WHERE id = ? AND usuario_id = ?",
+        (comida_id, usuario_id),
     ).fetchone()
     return {"id": fila[0], "tipo": fila[1], "fecha": fila[2], "orden": fila[3], "created_at": fila[4]}
 
@@ -288,17 +311,20 @@ def listar_comidas(desde: str | None = None, hasta: str | None = None) -> list[d
     usado por /registro-diario para pedir solo un mes en vez de todo el
     historial en cada carga. None = sin ese límite (comportamiento de siempre).
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
-        condiciones = []
-        params: list = []
+        condiciones = ["c.usuario_id = ?"]
+        params: list = [usuario_id]
         if desde is not None:
             condiciones.append("c.fecha >= ?")
             params.append(desde)
         if hasta is not None:
             condiciones.append("c.fecha <= ?")
             params.append(hasta)
-        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+        where = f"WHERE {' AND '.join(condiciones)}"
         comidas = [
             {
                 "id": f[0],
@@ -320,13 +346,21 @@ def listar_comidas(desde: str | None = None, hasta: str | None = None) -> list[d
             )
         ]
         por_id = {c["id"]: c for c in comidas}
+        # usuario_id = ? acá también: sin este filtro, la query trae TODOS
+        # los consumos de TODOS los usuarios a Python, y el descarte de "no
+        # es de ninguna comida mía" (comida = por_id.get(...) -- None si no
+        # es mía) pasa recién después, en memoria — funciona hoy porque
+        # por_id ya está acotado a mis comidas, pero es un filtro que debería
+        # vivir en la query, no depender de que el descarte de después nunca
+        # se le olvide a nadie que edite esta función.
         for f in conn.execute(
             """
             SELECT id, comida_id, conversation_id, platillo, kilocalorias, proteinas, carbohidratos, grasas
             FROM consumos
-            WHERE comida_id IS NOT NULL
+            WHERE comida_id IS NOT NULL AND usuario_id = ?
             ORDER BY id
-            """
+            """,
+            (usuario_id,),
         ):
             comida = por_id.get(f[1])
             if comida:
@@ -364,19 +398,30 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
     porque en la rama ON CONFLICT DO UPDATE no refleja el id de la fila
     actualizada.
 
-    LANZA si la escritura falla (p. ej. permisos de archivo, o comida_id que
-    no existe — la FK lo rechaza). El endpoint /consumos traduce el error a
+    LANZA ValueError si `comida_id` no existe o no es del usuario en curso —
+    la FK por sí sola solo garantiza que la comida EXISTE, no que sea tuya.
+    LANZA (cualquier otra excepción) si la escritura falla (p. ej. permisos
+    de archivo). El endpoint /consumos traduce ValueError a 404 y el resto a
     un HTTP 503 para que el usuario reciba feedback del guardado (es una
     acción deliberada con botón, no automática).
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
+        if datos.comida_id is not None:
+            propia = conn.execute(
+                "SELECT 1 FROM comidas WHERE id = ? AND usuario_id = ?", (datos.comida_id, usuario_id)
+            ).fetchone()
+            if propia is None:
+                raise ValueError(f"No existe la comida {datos.comida_id}")
         conn.execute(
             """
             INSERT INTO consumos
-                (conversation_id, comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
+                (usuario_id, conversation_id, comida_id, platillo, kilocalorias, proteinas, carbohidratos, grasas)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(usuario_id, conversation_id) DO UPDATE SET
                 comida_id = excluded.comida_id,
                 platillo = excluded.platillo,
                 kilocalorias = excluded.kilocalorias,
@@ -386,6 +431,7 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
                 updated_at = CURRENT_TIMESTAMP
             """,
             (
+                usuario_id,
                 conversation_id,
                 datos.comida_id,
                 datos.platillo,
@@ -397,8 +443,9 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
         )
         conn.commit()
         fila = conn.execute(
-            "SELECT id, platillo, kilocalorias, proteinas, carbohidratos, grasas FROM consumos WHERE conversation_id = ?",
-            (conversation_id,),
+            "SELECT id, platillo, kilocalorias, proteinas, carbohidratos, grasas FROM consumos "
+            "WHERE usuario_id = ? AND conversation_id = ?",
+            (usuario_id, conversation_id),
         ).fetchone()
         return {
             "id": fila[0],
@@ -554,24 +601,27 @@ def guardar_metrica_ios(
     ya hubiera en vez de borrarlo — así el Atajo actualizando el número no
     pisa una descripción que ya habías escrito a mano.
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO metricas_ios (fecha, tipo, valor, fuente, concepto)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(fecha, tipo) DO UPDATE SET
+            INSERT INTO metricas_ios (usuario_id, fecha, tipo, valor, fuente, concepto)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(usuario_id, fecha, tipo) DO UPDATE SET
                 valor = excluded.valor,
                 fuente = excluded.fuente,
                 concepto = COALESCE(excluded.concepto, metricas_ios.concepto),
                 actualizado_at = CURRENT_TIMESTAMP
             """,
-            (fecha, tipo, valor, fuente, concepto),
+            (usuario_id, fecha, tipo, valor, fuente, concepto),
         )
         conn.commit()
         fila = conn.execute(
-            "SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios WHERE fecha = ? AND tipo = ?",
-            (fecha, tipo),
+            "SELECT fecha, tipo, valor, fuente, concepto FROM metricas_ios WHERE usuario_id = ? AND fecha = ? AND tipo = ?",
+            (usuario_id, fecha, tipo),
         ).fetchone()
         return {"fecha": fila[0], "tipo": fila[1], "valor": fila[2], "fuente": fila[3], "concepto": fila[4]}
     finally:
@@ -580,21 +630,24 @@ def guardar_metrica_ios(
 
 def listar_metricas_ios(desde: str | None = None, hasta: str | None = None) -> list[dict]:
     """
-    Todas las filas guardadas — el front filtra por tipo y por día como ya
-    hace con comidas. desde/hasta ("YYYY-MM-DD", opcionales, inclusivos):
-    mismo acotado por rango que listar_comidas, para /registro-diario.
+    Todas las filas guardadas del usuario en curso — el front filtra por
+    tipo y por día como ya hace con comidas. desde/hasta ("YYYY-MM-DD",
+    opcionales, inclusivos): mismo acotado por rango que listar_comidas,
+    para /registro-diario.
     """
+    from auth import uid
+
     conn = get_connection()
     try:
-        condiciones = []
-        params: list = []
+        condiciones = ["usuario_id = ?"]
+        params: list = [uid()]
         if desde is not None:
             condiciones.append("fecha >= ?")
             params.append(desde)
         if hasta is not None:
             condiciones.append("fecha <= ?")
             params.append(hasta)
-        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+        where = f"WHERE {' AND '.join(condiciones)}"
         return [
             {"fecha": f[0], "tipo": f[1], "valor": f[2], "fuente": f[3], "concepto": f[4]}
             for f in conn.execute(
@@ -608,16 +661,19 @@ def listar_metricas_ios(desde: str | None = None, hasta: str | None = None) -> l
 
 def crear_ejercicio(fecha: str, concepto: str, kilocalorias: float) -> dict:
     """Agrega una entrada de ejercicio (bitácora — no reemplaza las anteriores del día)."""
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO ejercicios (fecha, concepto, kilocalorias) VALUES (?, ?, ?)",
-            (fecha, concepto, kilocalorias),
+            "INSERT INTO ejercicios (usuario_id, fecha, concepto, kilocalorias) VALUES (?, ?, ?, ?)",
+            (usuario_id, fecha, concepto, kilocalorias),
         )
         conn.commit()
         fila = conn.execute(
-            "SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios WHERE id = ?",
-            (cursor.lastrowid,),
+            "SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios WHERE id = ? AND usuario_id = ?",
+            (cursor.lastrowid, usuario_id),
         ).fetchone()
         return {"id": fila[0], "fecha": fila[1], "concepto": fila[2], "kilocalorias": fila[3], "created_at": fila[4]}
     finally:
@@ -626,21 +682,24 @@ def crear_ejercicio(fecha: str, concepto: str, kilocalorias: float) -> dict:
 
 def listar_ejercicios(desde: str | None = None, hasta: str | None = None) -> list[dict]:
     """
-    Todas las entradas de ejercicio guardadas, día más reciente primero.
-    desde/hasta ("YYYY-MM-DD", opcionales, inclusivos): mismo acotado por
-    rango que listar_comidas/listar_metricas_ios, para /registro-diario.
+    Todas las entradas de ejercicio del usuario en curso, día más reciente
+    primero. desde/hasta ("YYYY-MM-DD", opcionales, inclusivos): mismo
+    acotado por rango que listar_comidas/listar_metricas_ios, para
+    /registro-diario.
     """
+    from auth import uid
+
     conn = get_connection()
     try:
-        condiciones = []
-        params: list = []
+        condiciones = ["usuario_id = ?"]
+        params: list = [uid()]
         if desde is not None:
             condiciones.append("fecha >= ?")
             params.append(desde)
         if hasta is not None:
             condiciones.append("fecha <= ?")
             params.append(hasta)
-        where = f"WHERE {' AND '.join(condiciones)}" if condiciones else ""
+        where = f"WHERE {' AND '.join(condiciones)}"
         return [
             {"id": f[0], "fecha": f[1], "concepto": f[2], "kilocalorias": f[3], "created_at": f[4]}
             for f in conn.execute(
@@ -654,9 +713,13 @@ def listar_ejercicios(desde: str | None = None, hasta: str | None = None) -> lis
 
 def eliminar_ejercicio(ejercicio_id: int) -> None:
     """Borra una entrada de ejercicio (botón de eliminar de la bitácora)."""
+    from auth import uid
+
     conn = get_connection()
     try:
-        cursor = conn.execute("DELETE FROM ejercicios WHERE id = ?", (ejercicio_id,))
+        cursor = conn.execute(
+            "DELETE FROM ejercicios WHERE id = ? AND usuario_id = ?", (ejercicio_id, uid())
+        )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el ejercicio {ejercicio_id}")
         conn.commit()
@@ -672,16 +735,21 @@ def crear_favorito(
     grasas: float | None,
 ) -> dict:
     """Guarda un platillo (con sus macros ya calculados) para reusar sin IA."""
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO favoritos (nombre, kilocalorias, proteinas, carbohidratos, grasas) VALUES (?, ?, ?, ?, ?)",
-            (nombre, kilocalorias, proteinas, carbohidratos, grasas),
+            "INSERT INTO favoritos (usuario_id, nombre, kilocalorias, proteinas, carbohidratos, grasas) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (usuario_id, nombre, kilocalorias, proteinas, carbohidratos, grasas),
         )
         conn.commit()
         fila = conn.execute(
-            "SELECT id, nombre, kilocalorias, proteinas, carbohidratos, grasas, created_at FROM favoritos WHERE id = ?",
-            (cursor.lastrowid,),
+            "SELECT id, nombre, kilocalorias, proteinas, carbohidratos, grasas, created_at "
+            "FROM favoritos WHERE id = ? AND usuario_id = ?",
+            (cursor.lastrowid, usuario_id),
         ).fetchone()
         return {
             "id": fila[0],
@@ -697,7 +765,9 @@ def crear_favorito(
 
 
 def listar_favoritos() -> list[dict]:
-    """Todos los favoritos guardados, más reciente primero."""
+    """Todos los favoritos del usuario en curso, más reciente primero."""
+    from auth import uid
+
     conn = get_connection()
     try:
         return [
@@ -712,7 +782,8 @@ def listar_favoritos() -> list[dict]:
             }
             for f in conn.execute(
                 "SELECT id, nombre, kilocalorias, proteinas, carbohidratos, grasas, created_at "
-                "FROM favoritos ORDER BY id DESC"
+                "FROM favoritos WHERE usuario_id = ? ORDER BY id DESC",
+                (uid(),),
             )
         ]
     finally:
@@ -721,9 +792,13 @@ def listar_favoritos() -> list[dict]:
 
 def eliminar_favorito(favorito_id: int) -> None:
     """Borra un favorito (ya no aparece en la lista rápida del chat)."""
+    from auth import uid
+
     conn = get_connection()
     try:
-        cursor = conn.execute("DELETE FROM favoritos WHERE id = ?", (favorito_id,))
+        cursor = conn.execute(
+            "DELETE FROM favoritos WHERE id = ? AND usuario_id = ?", (favorito_id, uid())
+        )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el favorito {favorito_id}")
         conn.commit()
@@ -732,20 +807,22 @@ def eliminar_favorito(favorito_id: int) -> None:
 
 
 def guardar_perfil(fecha_nacimiento: str, estatura_cm: float, sexo: str) -> dict:
-    """Upsert de la única fila de perfil (id=1) — app de un solo usuario."""
+    """Upsert del perfil del usuario en curso (una fila por usuario; usuario_id es la PK)."""
+    from auth import uid
+
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO perfil (id, fecha_nacimiento, estatura_cm, sexo)
-            VALUES (1, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            INSERT INTO perfil (usuario_id, fecha_nacimiento, estatura_cm, sexo)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(usuario_id) DO UPDATE SET
                 fecha_nacimiento = excluded.fecha_nacimiento,
                 estatura_cm = excluded.estatura_cm,
                 sexo = excluded.sexo,
                 actualizado_at = CURRENT_TIMESTAMP
             """,
-            (fecha_nacimiento, estatura_cm, sexo),
+            (uid(), fecha_nacimiento, estatura_cm, sexo),
         )
         conn.commit()
         return {"fecha_nacimiento": fecha_nacimiento, "estatura_cm": estatura_cm, "sexo": sexo}
@@ -754,11 +831,13 @@ def guardar_perfil(fecha_nacimiento: str, estatura_cm: float, sexo: str) -> dict
 
 
 def obtener_perfil() -> dict | None:
-    """None si todavía no se ha capturado el perfil (primera vez)."""
+    """None si el usuario en curso todavía no ha capturado su perfil."""
+    from auth import uid
+
     conn = get_connection()
     try:
         fila = conn.execute(
-            "SELECT fecha_nacimiento, estatura_cm, sexo FROM perfil WHERE id = 1"
+            "SELECT fecha_nacimiento, estatura_cm, sexo FROM perfil WHERE usuario_id = ?", (uid(),)
         ).fetchone()
         if fila is None:
             return None
