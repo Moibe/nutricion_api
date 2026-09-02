@@ -844,3 +844,87 @@ def obtener_perfil() -> dict | None:
         return {"fecha_nacimiento": fila[0], "estatura_cm": fila[1], "sexo": fila[2]}
     finally:
         conn.close()
+
+
+# --- Administración de usuarios (solo el dueño, ver auth.requerir_admin) ----
+def listar_usuarios() -> list[dict]:
+    """Todos los usuarios dados de alta. NUNCA incluye codigo_acceso -- ese
+    valor solo se muestra una vez, al crearlo o al regenerarlo."""
+    conn = get_connection()
+    try:
+        return [
+            {"id": f[0], "nombre": f[1], "activo": bool(f[2]), "created_at": f[3]}
+            for f in conn.execute("SELECT id, nombre, activo, created_at FROM usuarios ORDER BY id")
+        ]
+    finally:
+        conn.close()
+
+
+def crear_usuario_admin(nombre: str) -> dict:
+    """Da de alta un usuario nuevo (equivalente web de crear_usuario.py, sin --id:
+    el dueño siempre es el id=1 reservado por la migración, nunca se crea otro así)."""
+    import secrets
+
+    codigo = secrets.token_urlsafe(8)
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO usuarios (nombre, codigo_acceso) VALUES (?, ?)", (nombre, codigo)
+        )
+        conn.commit()
+        return {"id": cursor.lastrowid, "nombre": nombre, "codigo_acceso": codigo}
+    finally:
+        conn.close()
+
+
+def actualizar_activo(usuario_id: int, activo: bool) -> None:
+    """Activar/desactivar. Desactivar al propio admin (id=1) se rechaza --
+    nadie más podría reactivarlo (es el único admin que existe)."""
+    from auth import ADMIN_USUARIO_ID
+
+    if usuario_id == ADMIN_USUARIO_ID and not activo:
+        raise ValueError("No puedes desactivar al administrador.")
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE usuarios SET activo = ? WHERE id = ?", (1 if activo else 0, usuario_id)
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el usuario {usuario_id}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def regenerar_codigo(usuario_id: int) -> str:
+    """Nuevo código de acceso al azar para un usuario existente (p. ej. si
+    perdió el que tenía) -- el anterior deja de servir de inmediato."""
+    import secrets
+
+    codigo = secrets.token_urlsafe(8)
+    conn = get_connection()
+    try:
+        cursor = conn.execute("UPDATE usuarios SET codigo_acceso = ? WHERE id = ?", (codigo, usuario_id))
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el usuario {usuario_id}")
+        conn.commit()
+        return codigo
+    finally:
+        conn.close()
+
+
+def revocar_sesiones(usuario_id: int) -> None:
+    """Sube token_version: la cookie de sesión que ese usuario ya tiene en su
+    navegador deja de servir en su próxima request (ver auth._resolver_por_proxy),
+    sin desactivar la cuenta ni afectar a nadie más. No hace falta una tabla
+    de sesiones -- la sesión es la cookie firmada + esta comparación."""
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "UPDATE usuarios SET token_version = token_version + 1 WHERE id = ?", (usuario_id,)
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el usuario {usuario_id}")
+        conn.commit()
+    finally:
+        conn.close()

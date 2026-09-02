@@ -18,8 +18,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationInfo, field_validator
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
-from auth import INTERNAL_TOKEN, resolver_usuario, uid
+from auth import INTERNAL_TOKEN, requerir_admin, resolver_usuario, uid
 from connection import (
+    actualizar_activo,
     actualizar_fecha_comida,
     asegurar_schema,
     completar_cupo_ia,
@@ -27,6 +28,7 @@ from connection import (
     crear_conversacion_si_falta,
     crear_ejercicio,
     crear_favorito,
+    crear_usuario_admin,
     eliminar_comida,
     eliminar_consumo,
     eliminar_ejercicio,
@@ -40,10 +42,13 @@ from connection import (
     listar_ejercicios,
     listar_favoritos,
     listar_metricas_ios,
+    listar_usuarios,
     obtener_perfil,
     obtener_usuario_de_conversacion,
+    regenerar_codigo,
     reservar_cupo_ia,
     resumen_uso,
+    revocar_sesiones,
 )
 from schema import RespuestaKilocalculator
 
@@ -667,6 +672,67 @@ def yo():
     finally:
         conn.close()
     return {"id": fila[0], "nombre": fila[1]}
+
+
+# --- Admin: gestión de usuarios (solo el dueño, ver auth.requerir_admin) -------
+class UsuarioAdminIn(BaseModel):
+    nombre: str
+
+    @field_validator("nombre")
+    @classmethod
+    def _nombre_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("nombre no puede estar vacío")
+        return v
+
+
+class ActivoIn(BaseModel):
+    activo: bool
+
+
+@router_protegido.get("/admin/usuarios", dependencies=[Depends(requerir_admin)])
+def listar_usuarios_endpoint():
+    return listar_usuarios()
+
+
+@router_protegido.post("/admin/usuarios", dependencies=[Depends(requerir_admin)])
+def crear_usuario_endpoint(body: UsuarioAdminIn):
+    """Da de alta un usuario y regresa su código de acceso -- se muestra UNA
+    vez en el front, el back nunca lo vuelve a exponer (listar_usuarios no lo trae)."""
+    try:
+        return crear_usuario_admin(body.nombre)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo crear: {exc}") from exc
+
+
+@router_protegido.patch("/admin/usuarios/{usuario_id}/activo", dependencies=[Depends(requerir_admin)])
+def actualizar_activo_endpoint(usuario_id: int, body: ActivoIn):
+    try:
+        actualizar_activo(usuario_id, body.activo)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@router_protegido.post(
+    "/admin/usuarios/{usuario_id}/regenerar-codigo", dependencies=[Depends(requerir_admin)]
+)
+def regenerar_codigo_endpoint(usuario_id: int):
+    try:
+        codigo = regenerar_codigo(usuario_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"codigo_acceso": codigo}
+
+
+@router_protegido.post("/admin/usuarios/{usuario_id}/revocar", dependencies=[Depends(requerir_admin)])
+def revocar_sesiones_endpoint(usuario_id: int):
+    try:
+        revocar_sesiones(usuario_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True}
 
 
 # Se registra AL FINAL, ya con todas las rutas de arriba acumuladas en el router.

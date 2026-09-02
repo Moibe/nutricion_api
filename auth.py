@@ -124,7 +124,21 @@ def _resolver_por_proxy(
     # Defensa en profundidad: el proxy YA debería haber checado esto contra
     # la cookie antes de reenviar, pero si un día tiene un bug, esta segunda
     # verificación (independiente, contra la DB) sigue cerrando la sesión
-    # revocada. Opcional mientras Fase 4 no manda el header todavía.
+    # revocada. Se mantiene opcional (el Atajo de iOS y scripts sueltos nunca
+    # lo mandan) aunque el proxy del front ya lo manda siempre desde Fase 4.
     if x_token_version is not None and str(fila[1]) != x_token_version:
         raise HTTPException(status_code=401, detail="Sesión revocada.")
     return candidato
+
+
+# El dueño: id=1 por construcción (Fase 1 migró todo el historial existente a
+# ese id, y crear_usuario.py lo reserva con --id 1). Un solo admin es
+# suficiente para el tamaño real de esta app -- no vale la pena una columna
+# es_admin para un caso que no existe todavía.
+ADMIN_USUARIO_ID = 1
+
+
+def requerir_admin() -> None:
+    """Dependency adicional (compuesta con resolver_usuario) para /admin/*."""
+    if uid() != ADMIN_USUARIO_ID:
+        raise HTTPException(status_code=403, detail="Solo el administrador puede hacer esto.")
