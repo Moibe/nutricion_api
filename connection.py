@@ -860,12 +860,17 @@ def listar_usuarios() -> list[dict]:
         conn.close()
 
 
-def crear_usuario_admin(nombre: str) -> dict:
+def crear_usuario_admin(nombre: str, codigo_acceso: str | None = None) -> dict:
     """Da de alta un usuario nuevo (equivalente web de crear_usuario.py, sin --id:
-    el dueño siempre es el id=1 reservado por la migración, nunca se crea otro así)."""
+    el dueño siempre es el id=1 reservado por la migración, nunca se crea otro así).
+
+    codigo_acceso: si se manda, se usa tal cual (el admin eligió algo
+    memorable); si no, se genera uno aleatorio como antes. sqlite3.IntegrityError
+    se propaga tal cual si el código elegido ya está en uso (UNIQUE) -- main.py
+    lo traduce a un 409 claro."""
     import secrets
 
-    codigo = secrets.token_urlsafe(8)
+    codigo = codigo_acceso or secrets.token_urlsafe(8)
     conn = get_connection()
     try:
         cursor = conn.execute(
@@ -896,12 +901,13 @@ def actualizar_activo(usuario_id: int, activo: bool) -> None:
         conn.close()
 
 
-def regenerar_codigo(usuario_id: int) -> str:
-    """Nuevo código de acceso al azar para un usuario existente (p. ej. si
-    perdió el que tenía) -- el anterior deja de servir de inmediato."""
+def regenerar_codigo(usuario_id: int, codigo_acceso: str | None = None) -> str:
+    """Nuevo código de acceso para un usuario existente (p. ej. si perdió el
+    que tenía) -- el anterior deja de servir de inmediato. codigo_acceso
+    opcional: si se manda se usa tal cual, si no se genera uno al azar."""
     import secrets
 
-    codigo = secrets.token_urlsafe(8)
+    codigo = codigo_acceso or secrets.token_urlsafe(8)
     conn = get_connection()
     try:
         cursor = conn.execute("UPDATE usuarios SET codigo_acceso = ? WHERE id = ?", (codigo, usuario_id))

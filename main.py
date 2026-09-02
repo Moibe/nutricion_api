@@ -7,6 +7,7 @@ Docs interactivas:  http://127.0.0.1:8000/docs
 """
 
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
@@ -675,8 +676,22 @@ def yo():
 
 
 # --- Admin: gestión de usuarios (solo el dueño, ver auth.requerir_admin) -------
+def _codigo_opcional_valido(v: Optional[str]) -> Optional[str]:
+    """Compartido entre UsuarioAdminIn y RegenerarCodigoIn: recorta espacios,
+    y una cadena vacía cuenta como "no especificado" (se autogenera), no
+    como un código real de puros espacios."""
+    if v is None:
+        return v
+    v = v.strip()
+    return v or None
+
+
 class UsuarioAdminIn(BaseModel):
     nombre: str
+    # Si se manda, se usa tal cual en vez de generar uno aleatorio -- para
+    # que el dueño pueda elegir algo memorable ("mama2026") en vez de un
+    # token random. Ver el comentario de seguridad en crear_usuario_admin.
+    codigo_acceso: Optional[str] = None
 
     @field_validator("nombre")
     @classmethod
@@ -686,9 +701,17 @@ class UsuarioAdminIn(BaseModel):
             raise ValueError("nombre no puede estar vacío")
         return v
 
+    _codigo_valido = field_validator("codigo_acceso")(_codigo_opcional_valido)
+
 
 class ActivoIn(BaseModel):
     activo: bool
+
+
+class RegenerarCodigoIn(BaseModel):
+    codigo_acceso: Optional[str] = None
+
+    _codigo_valido = field_validator("codigo_acceso")(_codigo_opcional_valido)
 
 
 @router_protegido.get("/admin/usuarios", dependencies=[Depends(requerir_admin)])
@@ -701,7 +724,9 @@ def crear_usuario_endpoint(body: UsuarioAdminIn):
     """Da de alta un usuario y regresa su código de acceso -- se muestra UNA
     vez en el front, el back nunca lo vuelve a exponer (listar_usuarios no lo trae)."""
     try:
-        return crear_usuario_admin(body.nombre)
+        return crear_usuario_admin(body.nombre, body.codigo_acceso)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Ese código de acceso ya está en uso.") from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo crear: {exc}") from exc
 
@@ -718,11 +743,13 @@ def actualizar_activo_endpoint(usuario_id: int, body: ActivoIn):
 @router_protegido.post(
     "/admin/usuarios/{usuario_id}/regenerar-codigo", dependencies=[Depends(requerir_admin)]
 )
-def regenerar_codigo_endpoint(usuario_id: int):
+def regenerar_codigo_endpoint(usuario_id: int, body: RegenerarCodigoIn):
     try:
-        codigo = regenerar_codigo(usuario_id)
+        codigo = regenerar_codigo(usuario_id, body.codigo_acceso)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="Ese código de acceso ya está en uso.") from exc
     return {"codigo_acceso": codigo}
 
 
