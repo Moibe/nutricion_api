@@ -7,6 +7,7 @@ Docs interactivas:  http://127.0.0.1:8000/docs
 """
 
 import os
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
 
@@ -17,6 +18,7 @@ from pydantic import BaseModel, ValidationInfo, field_validator
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
 from connection import (
     actualizar_fecha_comida,
+    asegurar_schema,
     crear_comida,
     crear_ejercicio,
     crear_favorito,
@@ -40,7 +42,17 @@ from schema import RespuestaKilocalculator
 
 client = crear_cliente()
 
-app = FastAPI(title="Kilocalculator — Responses API PoC", version="0.0.1")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Antes esto corría dentro de get_connection(), o sea en CADA request —
+    # ~15 CREATE TABLE IF NOT EXISTS + varios PRAGMA table_info de más por
+    # llamada a la API. Ahora corre una sola vez, al arrancar.
+    asegurar_schema()
+    yield
+
+
+app = FastAPI(title="Kilocalculator — Responses API PoC", version="0.0.1", lifespan=lifespan)
 
 
 # --- CORS ---------------------------------------------------------------------

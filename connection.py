@@ -32,151 +32,172 @@ def mes_cdmx() -> str:
 
 def get_connection() -> sqlite3.Connection:
     """
-    Abre la base de datos (se crea sola si no existe) y asegura el esquema.
+    Abre la base de datos (se crea sola si no existe). El esquema se asegura
+    UNA vez al arrancar la API (asegurar_schema(), llamada desde el lifespan
+    de main.py) — antes corría aquí mismo, o sea en CADA request.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    # WAL: lecturas no bloquean escrituras (importa en cuanto haya más de un
+    # usuario pegándole a la API a la vez). busy_timeout: si dos escrituras
+    # coinciden, la segunda espera en vez de tronar con "database is locked".
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
+    return conn
+
+
+def asegurar_schema() -> None:
+    """
+    Crea las tablas base si no existen y corre las migraciones in-place
+    chiquitas (agregar una columna, tirar una tabla vieja) — idempotente,
+    se puede llamar de más sin romper nada. Se llama UNA vez al arrancar la
+    API, no en cada conexión.
 
     Modelo: una `comida` (desayuno/comida/cena/colación) agrupa varios
     `consumos` (1:N). `comida_id` es nullable porque todavía no hay
     API/UI para asignarlo — los consumos guardados hasta ahora quedan
     sueltos (NULL), y así seguirá hasta que se conecte ese flujo.
     """
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS comidas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tipo TEXT NOT NULL CHECK (tipo IN ('desayuno', 'comida', 'cena', 'colacion')),
-            fecha TEXT NOT NULL,
-            -- Posición en la secuencia del día (Desayuno=0, Colación 1=1,
-            -- Comida=2, Colación 2=3, Cena=4). Separado de `tipo` porque las
-            -- dos colaciones comparten tipo pero van en momentos distintos.
-            orden INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS comidas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tipo TEXT NOT NULL CHECK (tipo IN ('desayuno', 'comida', 'cena', 'colacion')),
+                fecha TEXT NOT NULL,
+                -- Posición en la secuencia del día (Desayuno=0, Colación 1=1,
+                -- Comida=2, Colación 2=3, Cena=4). Separado de `tipo` porque las
+                -- dos colaciones comparten tipo pero van en momentos distintos.
+                orden INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS consumos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id TEXT NOT NULL UNIQUE,
-            comida_id INTEGER REFERENCES comidas(id),
-            platillo TEXT,
-            kilocalorias REAL,
-            proteinas REAL,
-            carbohidratos REAL,
-            grasas REAL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS consumos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL UNIQUE,
+                comida_id INTEGER REFERENCES comidas(id),
+                platillo TEXT,
+                kilocalorias REAL,
+                proteinas REAL,
+                carbohidratos REAL,
+                grasas REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    # Migración in-place para bases creadas antes de que existiera comida_id.
-    columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(consumos)")}
-    if "comida_id" not in columnas:
-        conn.execute("ALTER TABLE consumos ADD COLUMN comida_id INTEGER REFERENCES comidas(id)")
-    # Migración in-place para bases creadas antes de que existiera orden.
-    columnas_comidas = {fila[1] for fila in conn.execute("PRAGMA table_info(comidas)")}
-    if "orden" not in columnas_comidas:
-        conn.execute("ALTER TABLE comidas ADD COLUMN orden INTEGER NOT NULL DEFAULT 0")
-    # Uso de tokens de OpenAI: una fila por llamada a /chat, para el monitor de gasto.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS uso_ia (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conversation_id TEXT,
-            modelo TEXT,
-            input_tokens INTEGER NOT NULL DEFAULT 0,
-            output_tokens INTEGER NOT NULL DEFAULT 0,
-            fecha TEXT NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        # Migración in-place para bases creadas antes de que existiera comida_id.
+        columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(consumos)")}
+        if "comida_id" not in columnas:
+            conn.execute("ALTER TABLE consumos ADD COLUMN comida_id INTEGER REFERENCES comidas(id)")
+        # Migración in-place para bases creadas antes de que existiera orden.
+        columnas_comidas = {fila[1] for fila in conn.execute("PRAGMA table_info(comidas)")}
+        if "orden" not in columnas_comidas:
+            conn.execute("ALTER TABLE comidas ADD COLUMN orden INTEGER NOT NULL DEFAULT 0")
+        # Uso de tokens de OpenAI: una fila por llamada a /chat, para el monitor de gasto.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS uso_ia (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT,
+                modelo TEXT,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                fecha TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    # Tabla anterior de un solo metric (solo calorías quemadas), reemplazada
-    # por metricas_ios de abajo, genérica para varios tipos de dato de iOS
-    # (calorías quemadas, peso, lo que se agregue después). Nunca llegó a
-    # tener datos reales en producción, así que se puede tirar sin migrar nada.
-    # Guardado con el mismo patrón que las demás migraciones in-place de este
-    # archivo (solo corre de verdad una vez, no en cada apertura de conexión).
-    if conn.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calorias_quemadas'"
-    ).fetchone():
-        conn.execute("DROP TABLE calorias_quemadas")
-    # Métricas que manda un Atajo de iOS (Salud → nuestra API): una fila por
-    # (fecha, tipo) — upsert, porque el Atajo puede correr varias veces al día
-    # sobre el mismo día y siempre debe reemplazar el valor, no sumarlo.
-    # `tipo` distingue qué es `valor` (unidad implícita por tipo: kcal para
-    # calorias_quemadas, kg para peso). `concepto` es opcional (nullable):
-    # solo lo manda la captura manual de /ejercicio ("Correr 5km", "Pesas"...)
-    # — el Atajo de iOS solo conoce el número, no una descripción, así que
-    # nunca lo manda y no debe ser obligatorio o le rompería el POST.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS metricas_ios (
-            fecha TEXT NOT NULL,
-            tipo TEXT NOT NULL CHECK (tipo IN ('calorias_quemadas', 'peso')),
-            valor REAL NOT NULL,
-            concepto TEXT,
-            fuente TEXT NOT NULL DEFAULT 'atajo_ios',
-            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (fecha, tipo)
+        # Tabla anterior de un solo metric (solo calorías quemadas), reemplazada
+        # por metricas_ios de abajo, genérica para varios tipos de dato de iOS
+        # (calorías quemadas, peso, lo que se agregue después). Nunca llegó a
+        # tener datos reales en producción, así que se puede tirar sin migrar nada.
+        # Guardado con el mismo patrón que las demás migraciones in-place de este
+        # archivo (solo corre de verdad una vez, no en cada apertura de conexión).
+        if conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'calorias_quemadas'"
+        ).fetchone():
+            conn.execute("DROP TABLE calorias_quemadas")
+        # Métricas que manda un Atajo de iOS (Salud → nuestra API): una fila por
+        # (fecha, tipo) — upsert, porque el Atajo puede correr varias veces al día
+        # sobre el mismo día y siempre debe reemplazar el valor, no sumarlo.
+        # `tipo` distingue qué es `valor` (unidad implícita por tipo: kcal para
+        # calorias_quemadas, kg para peso). `concepto` es opcional (nullable):
+        # solo lo manda la captura manual de /ejercicio ("Correr 5km", "Pesas"...)
+        # — el Atajo de iOS solo conoce el número, no una descripción, así que
+        # nunca lo manda y no debe ser obligatorio o le rompería el POST.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metricas_ios (
+                fecha TEXT NOT NULL,
+                tipo TEXT NOT NULL CHECK (tipo IN ('calorias_quemadas', 'peso')),
+                valor REAL NOT NULL,
+                concepto TEXT,
+                fuente TEXT NOT NULL DEFAULT 'atajo_ios',
+                actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (fecha, tipo)
+            )
+            """
         )
-        """
-    )
-    # Migración in-place para bases creadas antes de que existiera concepto.
-    columnas_metricas = {fila[1] for fila in conn.execute("PRAGMA table_info(metricas_ios)")}
-    if "concepto" not in columnas_metricas:
-        conn.execute("ALTER TABLE metricas_ios ADD COLUMN concepto TEXT")
-    # Ejercicio manual: BITÁCORA, no un solo valor por día — cada "Guardar" de
-    # /ejercicio agrega una fila (mismo espíritu que comidas/consumos: varios
-    # renglones que se suman a un total del día), a diferencia de
-    # metricas_ios (upsert de un solo valor por fecha+tipo, que sigue siendo
-    # exclusivo del Atajo de iOS). "kcal quemadas" mostradas en el resto de la
-    # app = suma de esta tabla + el valor de metricas_ios, cuando exista.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS ejercicios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha TEXT NOT NULL,
-            concepto TEXT NOT NULL,
-            kilocalorias REAL NOT NULL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        # Migración in-place para bases creadas antes de que existiera concepto.
+        columnas_metricas = {fila[1] for fila in conn.execute("PRAGMA table_info(metricas_ios)")}
+        if "concepto" not in columnas_metricas:
+            conn.execute("ALTER TABLE metricas_ios ADD COLUMN concepto TEXT")
+        # Ejercicio manual: BITÁCORA, no un solo valor por día — cada "Guardar" de
+        # /ejercicio agrega una fila (mismo espíritu que comidas/consumos: varios
+        # renglones que se suman a un total del día), a diferencia de
+        # metricas_ios (upsert de un solo valor por fecha+tipo, que sigue siendo
+        # exclusivo del Atajo de iOS). "kcal quemadas" mostradas en el resto de la
+        # app = suma de esta tabla + el valor de metricas_ios, cuando exista.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ejercicios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha TEXT NOT NULL,
+                concepto TEXT NOT NULL,
+                kilocalorias REAL NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    # Favoritos: platillos que el usuario decide "recordar" con sus macros ya
-    # calculados por la IA, para reusarlos después con un tap (POST directo a
-    # /consumos) en vez de volver a describirlos y gastar otra llamada.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS favoritos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL,
-            kilocalorias REAL,
-            proteinas REAL,
-            carbohidratos REAL,
-            grasas REAL,
-            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        # Favoritos: platillos que el usuario decide "recordar" con sus macros ya
+        # calculados por la IA, para reusarlos después con un tap (POST directo a
+        # /consumos) en vez de volver a describirlos y gastar otra llamada.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS favoritos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nombre TEXT NOT NULL,
+                kilocalorias REAL,
+                proteinas REAL,
+                carbohidratos REAL,
+                grasas REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
-    # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
-    # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
-    # viejo; se calcula al vuelo cada vez que se necesita.
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS perfil (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            fecha_nacimiento TEXT NOT NULL,
-            estatura_cm REAL NOT NULL,
-            sexo TEXT NOT NULL CHECK (sexo IN ('hombre', 'mujer')),
-            actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
+        # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
+        # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
+        # viejo; se calcula al vuelo cada vez que se necesita.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS perfil (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                fecha_nacimiento TEXT NOT NULL,
+                estatura_cm REAL NOT NULL,
+                sexo TEXT NOT NULL CHECK (sexo IN ('hombre', 'mujer')),
+                actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
         )
-        """
-    )
-    return conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def crear_comida(tipo: str, orden: int = 0, fecha: str | None = None) -> dict:

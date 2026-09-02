@@ -17,6 +17,12 @@ env/
 nutricion.db
 nutricion.db-shm
 nutricion.db-wal
+# Copias de ensayo de la DB de producción (contienen datos reales) --
+# usadas para probar migraciones antes de correrlas en el droplet.
+ensayo_multiusuario.db
+ensayo_multiusuario.db-shm
+ensayo_multiusuario.db-wal
+*.bak-*.db
 
 # IDE
 .vscode/
