@@ -11,21 +11,27 @@ from contextlib import asynccontextmanager
 from datetime import date
 from typing import Literal, Optional
 
-from fastapi import FastAPI, HTTPException
+import hmac
+
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationInfo, field_validator
 
 from asistente import INSTRUCCIONES, MODELO, crear_cliente
+from auth import INTERNAL_TOKEN, resolver_usuario, uid
 from connection import (
     actualizar_fecha_comida,
     asegurar_schema,
+    completar_cupo_ia,
     crear_comida,
+    crear_conversacion_si_falta,
     crear_ejercicio,
     crear_favorito,
     eliminar_comida,
     eliminar_consumo,
     eliminar_ejercicio,
     eliminar_favorito,
+    get_connection,
     guardar_consumo,
     guardar_metrica_ios,
     guardar_perfil,
@@ -35,7 +41,8 @@ from connection import (
     listar_favoritos,
     listar_metricas_ios,
     obtener_perfil,
-    registrar_uso,
+    obtener_usuario_de_conversacion,
+    reservar_cupo_ia,
     resumen_uso,
 )
 from schema import RespuestaKilocalculator
@@ -53,6 +60,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Kilocalculator — Responses API PoC", version="0.0.1", lifespan=lifespan)
+
+# Todo lo que necesita saber DE QUIÉN son los datos vive acá, no en `app`
+# directo -- así un endpoint nuevo nace protegido por default con solo
+# agregarse a este router, sin tener que acordarse de poner
+# Depends(resolver_usuario) uno por uno. Lo único fuera de este router es
+# /health (lo pegan GitHub Actions/monitoring, sin sesión) y /auth/login
+# (todavía no hay usuario que resolver -- es COMO se consigue uno).
+router_protegido = APIRouter(dependencies=[Depends(resolver_usuario)])
 
 
 # --- CORS ---------------------------------------------------------------------
@@ -114,6 +129,11 @@ class ChatResponse(BaseModel):
 PRECIO_INPUT_USD_POR_1M = float(os.getenv("PRECIO_INPUT_USD_POR_1M", "2.0"))
 PRECIO_OUTPUT_USD_POR_1M = float(os.getenv("PRECIO_OUTPUT_USD_POR_1M", "8.0"))
 
+# Tope de tokens/día por usuario en /chat — para que una sola cuenta (bug de
+# cliente en loop, o alguien de mala fe) no se vuelva un problema de factura
+# cuando ya no hay un solo dueño vigilando el monitor de gasto.
+TOPE_TOKENS_DIA_USUARIO = int(os.getenv("TOPE_TOKENS_DIA_USUARIO", "200000"))
+
 
 # --- Endpoints ----------------------------------------------------------------
 @app.get("/health")
@@ -121,7 +141,7 @@ def health():
     return {"ok": True}
 
 
-@app.get("/uso")
+@router_protegido.get("/uso")
 def uso():
     """Monitor de gasto: tokens usados (total, mes y hoy) + costo estimado en USD."""
     try:
@@ -146,23 +166,48 @@ def uso():
     }
 
 
-@app.post("/chat", response_model=ChatResponse)
+@router_protegido.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
     """
     Un turno de conversación.
 
-    1) Si no hay conversation_id, crea una Conversation (reemplazo del Thread).
-    2) Llama a responses.parse con el modelo, las instrucciones, el mensaje del
+    1) Si viene conversation_id, DEBE ser del usuario en curso — si no, 404
+       (mismo patrón que ya usa el resto de la API para "tocar lo ajeno": ni
+       siquiera se distingue "existe pero no es tuya" de "no existe"). Sin
+       esto, cualquiera podría mandar el conversation_id de otra persona y
+       seguir leyendo/escribiendo su conversación.
+    2) Si no hay conversation_id, crea una Conversation nueva y la registra
+       como propia ANTES de llamar a OpenAI — si la llamada de abajo falla,
+       un reintento con ese mismo id ya la encuentra bien atribuida.
+    3) Tope diario de tokens por usuario (ver TOPE_TOKENS_DIA_USUARIO).
+    4) Llama a responses.parse con el modelo, las instrucciones, el mensaje del
        usuario y el schema estructurado. Al pasar `conversation`, OpenAI guarda
        e incluye automáticamente el historial — no hay que reenviar mensajes.
     """
     if not req.mensaje.strip() and not req.imagen_base64:
         raise HTTPException(status_code=422, detail="Falta mensaje o imagen.")
 
+    usuario_id = uid()
+
     conversation_id = req.conversation_id
-    if conversation_id is None:
+    if conversation_id is not None:
+        dueño = obtener_usuario_de_conversacion(conversation_id)
+        if dueño != usuario_id:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada.")
+    else:
         conversation = client.conversations.create()
         conversation_id = conversation.id
+        crear_conversacion_si_falta(conversation_id, usuario_id)
+
+    # Reserva ANTES de llamar a OpenAI (no "cuenta el uso y luego revisa"):
+    # ver reservar_cupo_ia para el porqué (check-then-act con una llamada
+    # lenta en medio es una carrera real entre requests concurrentes).
+    reserva_id = reservar_cupo_ia(usuario_id, TOPE_TOKENS_DIA_USUARIO)
+    if reserva_id is None:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Ya usaste tu tope de tokens de hoy ({TOPE_TOKENS_DIA_USUARIO}).",
+        )
 
     entrada = req.mensaje
     if req.contexto:
@@ -199,12 +244,15 @@ def chat(req: ChatRequest):
     except Exception as exc:  # noqa: BLE001 — en PoC propagamos el detalle
         raise HTTPException(status_code=502, detail=f"Error de OpenAI: {exc}") from exc
 
-    # Registrar uso de tokens (monitor de gasto). Best-effort: si falla, no
-    # rompemos la respuesta del chat.
+    # Corrige la reserva (RESERVA_TOKENS_ESTIMADA) con el gasto REAL. Si esto
+    # falla, la reserva se queda contando tal cual para el tope diario — a
+    # propósito: un "no se pudo actualizar" nunca debe dejar la cuota en
+    # blanco (ver completar_cupo_ia).
     try:
         usage = getattr(response, "usage", None)
         if usage is not None:
-            registrar_uso(
+            completar_cupo_ia(
+                reserva_id,
                 conversation_id,
                 MODELO,
                 getattr(usage, "input_tokens", 0) or 0,
@@ -227,7 +275,7 @@ class ConsumoIn(BaseModel):
     grasas: Optional[float] = None
 
 
-@app.post("/consumos")
+@router_protegido.post("/consumos")
 def crear_consumo(consumo: ConsumoIn):
     """Upsert (por conversation_id) del platillo final que el usuario decidió guardar."""
     try:
@@ -236,7 +284,7 @@ def crear_consumo(consumo: ConsumoIn):
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 
 
-@app.delete("/consumos/{consumo_id}")
+@router_protegido.delete("/consumos/{consumo_id}")
 def eliminar_consumo_endpoint(consumo_id: int):
     """Borra un consumo (botón de eliminar del Listado)."""
     try:
@@ -292,7 +340,7 @@ class FechaIn(BaseModel):
         return _validar_fecha_iso(v)
 
 
-@app.get("/comidas")
+@router_protegido.get("/comidas")
 def listar_comidas_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
     """
     Lista las comidas con al menos un consumo guardado, con sus consumos
@@ -311,7 +359,7 @@ def listar_comidas_endpoint(desde: Optional[str] = None, hasta: Optional[str] = 
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
-@app.post("/comidas")
+@router_protegido.post("/comidas")
 def crear_comida_endpoint(comida: ComidaIn):
     """Crea una instancia de comida (fecha = hoy en CDMX por default, o la que se mande)."""
     try:
@@ -320,7 +368,7 @@ def crear_comida_endpoint(comida: ComidaIn):
         raise HTTPException(status_code=503, detail=f"No se pudo crear la comida: {exc}") from exc
 
 
-@app.patch("/comidas/{comida_id}")
+@router_protegido.patch("/comidas/{comida_id}")
 def actualizar_fecha_comida_endpoint(comida_id: int, body: FechaIn):
     """Cambia la fecha de una comida (botón de calendario del front)."""
     try:
@@ -331,7 +379,7 @@ def actualizar_fecha_comida_endpoint(comida_id: int, body: FechaIn):
         raise HTTPException(status_code=503, detail=f"No se pudo actualizar: {exc}") from exc
 
 
-@app.delete("/comidas/{comida_id}")
+@router_protegido.delete("/comidas/{comida_id}")
 def eliminar_comida_endpoint(comida_id: int):
     """Borra una comida completa y todos sus consumos (ícono de bote en la tarjeta)."""
     try:
@@ -378,7 +426,7 @@ class MetricaIosIn(BaseModel):
         return v
 
 
-@app.get("/metricas-ios")
+@router_protegido.get("/metricas-ios")
 def listar_metricas_ios_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
     """
     Todas las filas guardadas; el front filtra por tipo y por día como con
@@ -397,7 +445,7 @@ def listar_metricas_ios_endpoint(desde: Optional[str] = None, hasta: Optional[st
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
-@app.post("/metricas-ios")
+@router_protegido.post("/metricas-ios")
 def guardar_metrica_ios_endpoint(body: MetricaIosIn):
     """Upsert por (fecha, tipo) — lo que mande el Atajo de iOS (calorías quemadas, peso, ...)."""
     try:
@@ -441,7 +489,7 @@ class EjercicioIn(BaseModel):
         return v
 
 
-@app.get("/ejercicios")
+@router_protegido.get("/ejercicios")
 def listar_ejercicios_endpoint(desde: Optional[str] = None, hasta: Optional[str] = None):
     """
     Lista la bitácora de ejercicio manual. desde/hasta ("YYYY-MM-DD",
@@ -460,7 +508,7 @@ def listar_ejercicios_endpoint(desde: Optional[str] = None, hasta: Optional[str]
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
-@app.post("/ejercicios")
+@router_protegido.post("/ejercicios")
 def crear_ejercicio_endpoint(ejercicio: EjercicioIn):
     """Agrega una entrada a la bitácora de ejercicio (botón Guardar de /ejercicio)."""
     try:
@@ -469,7 +517,7 @@ def crear_ejercicio_endpoint(ejercicio: EjercicioIn):
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 
 
-@app.delete("/ejercicios/{ejercicio_id}")
+@router_protegido.delete("/ejercicios/{ejercicio_id}")
 def eliminar_ejercicio_endpoint(ejercicio_id: int):
     """Borra una entrada de la bitácora de ejercicio."""
     try:
@@ -500,7 +548,7 @@ class FavoritoIn(BaseModel):
         return v
 
 
-@app.get("/favoritos")
+@router_protegido.get("/favoritos")
 def listar_favoritos_endpoint():
     """Lista de platillos guardados para reuso rápido en el chat."""
     try:
@@ -509,7 +557,7 @@ def listar_favoritos_endpoint():
         raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
 
 
-@app.post("/favoritos")
+@router_protegido.post("/favoritos")
 def crear_favorito_endpoint(favorito: FavoritoIn):
     """Guarda un platillo (botón "Guardar como frecuente" del chat)."""
     try:
@@ -520,7 +568,7 @@ def crear_favorito_endpoint(favorito: FavoritoIn):
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 
 
-@app.delete("/favoritos/{favorito_id}")
+@router_protegido.delete("/favoritos/{favorito_id}")
 def eliminar_favorito_endpoint(favorito_id: int):
     """Borra un favorito de la lista rápida."""
     try:
@@ -557,7 +605,7 @@ class PerfilIn(BaseModel):
         return v
 
 
-@app.get("/perfil")
+@router_protegido.get("/perfil")
 def obtener_perfil_endpoint():
     """None si todavía no se ha capturado (primera vez que se usa la app)."""
     try:
@@ -566,10 +614,57 @@ def obtener_perfil_endpoint():
         raise HTTPException(status_code=503, detail=f"No se pudo leer el perfil: {exc}") from exc
 
 
-@app.post("/perfil")
+@router_protegido.post("/perfil")
 def guardar_perfil_endpoint(body: PerfilIn):
     """Upsert del perfil (fecha_nacimiento/estatura/sexo)."""
     try:
         return guardar_perfil(body.fecha_nacimiento, body.estatura_cm, body.sexo)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+# --- Auth ----------------------------------------------------------------------
+class LoginIn(BaseModel):
+    codigo_acceso: str
+
+
+@app.post("/auth/login")
+def login(body: LoginIn, x_internal_token: Optional[str] = Header(default=None)):
+    """
+    Canjea un código de acceso por el usuario correspondiente. No requiere
+    sesión previa (es justo cómo se consigue una) pero SÍ requiere
+    X-Internal-Token -- solo el proxy del front (Fase 4) puede llamarlo,
+    nunca alguien pegándole directo a la API por internet a fuerza bruta
+    de códigos.
+    """
+    if not INTERNAL_TOKEN or not hmac.compare_digest(x_internal_token or "", INTERNAL_TOKEN):
+        raise HTTPException(status_code=401, detail="No autorizado.")
+
+    conn = get_connection()
+    try:
+        fila = conn.execute(
+            "SELECT id, nombre, token_version FROM usuarios WHERE codigo_acceso = ? AND activo = 1",
+            (body.codigo_acceso,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if fila is None:
+        raise HTTPException(status_code=401, detail="Código de acceso inválido.")
+
+    return {"id": fila[0], "nombre": fila[1], "token_version": fila[2]}
+
+
+@router_protegido.get("/auth/yo")
+def yo():
+    """Quién es el usuario de la sesión en curso (para pintar su nombre en el front)."""
+    conn = get_connection()
+    try:
+        fila = conn.execute("SELECT id, nombre FROM usuarios WHERE id = ?", (uid(),)).fetchone()
+    finally:
+        conn.close()
+    return {"id": fila[0], "nombre": fila[1]}
+
+
+# Se registra AL FINAL, ya con todas las rutas de arriba acumuladas en el router.
+app.include_router(router_protegido)

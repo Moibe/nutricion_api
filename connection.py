@@ -412,16 +412,70 @@ def guardar_consumo(conversation_id: str, datos) -> dict:
         conn.close()
 
 
-def registrar_uso(conversation_id, modelo: str, input_tokens: int, output_tokens: int) -> None:
-    """Registra el uso de tokens de una llamada a OpenAI (monitor de gasto)."""
+# Estimado conservador de un turno típico de /chat (ver reservar_cupo_ia) --
+# se corrige con el gasto real en cuanto OpenAI responde (completar_cupo_ia).
+RESERVA_TOKENS_ESTIMADA = 1500
+
+
+def reservar_cupo_ia(usuario_id: int, tope_tokens_dia: int) -> int | None:
+    """
+    Aparta cupo de la cuota diaria ANTES de llamar a OpenAI (que tarda
+    segundos), no después. Sin esto, dos /chat concurrentes del mismo
+    usuario leen el mismo total "de antes" y ambos pasan el tope — un
+    check-then-act clásico, con la llamada lenta de por medio agrandando la
+    ventana de la carrera. BEGIN IMMEDIATE adquiere el lock de escritura de
+    una vez (en vez de esperar a la primera escritura real), así que una
+    segunda reserva concurrente queda serializada detrás de esta — corre
+    después, ya viendo el total actualizado (busy_timeout de get_connection
+    hace que espere en vez de tronar "database is locked").
+
+    Devuelve el id de la fila placeholder (para completar_cupo_ia), o None
+    si ya no hay cupo.
+    """
+    conn = get_connection()
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        fila = conn.execute(
+            "SELECT COALESCE(SUM(input_tokens), 0) + COALESCE(SUM(output_tokens), 0) "
+            "FROM uso_ia WHERE usuario_id = ? AND fecha = ?",
+            (usuario_id, hoy_cdmx()),
+        ).fetchone()
+        # Estricto: rechaza si ESTA reserva empujaría el total por encima del
+        # tope (no solo si ya estaba pasado antes de esta llamada) — así el
+        # tope acota el gasto real, no "el gasto real menos una reserva de
+        # más que se dejó pasar".
+        if fila[0] + RESERVA_TOKENS_ESTIMADA > tope_tokens_dia:
+            conn.execute("ROLLBACK")
+            return None
+        cursor = conn.execute(
+            """
+            INSERT INTO uso_ia (usuario_id, conversation_id, modelo, input_tokens, output_tokens, fecha)
+            VALUES (?, NULL, NULL, ?, 0, ?)
+            """,
+            (usuario_id, RESERVA_TOKENS_ESTIMADA, hoy_cdmx()),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+def completar_cupo_ia(fila_id: int, conversation_id: str, modelo: str, input_tokens: int, output_tokens: int) -> None:
+    """
+    Corrige la reserva de reservar_cupo_ia() con el gasto REAL una vez que
+    OpenAI ya respondió (el estimado de la reserva casi nunca es exacto).
+    Si esto llega a fallar, la reserva (RESERVA_TOKENS_ESTIMADA) se queda
+    contando tal cual — a diferencia del registrar_uso() de antes, que si
+    fallaba dejaba el tope sin contar NADA para esa llamada.
+    """
     conn = get_connection()
     try:
         conn.execute(
             """
-            INSERT INTO uso_ia (conversation_id, modelo, input_tokens, output_tokens, fecha)
-            VALUES (?, ?, ?, ?, ?)
+            UPDATE uso_ia SET conversation_id = ?, modelo = ?, input_tokens = ?, output_tokens = ?
+            WHERE id = ?
             """,
-            (conversation_id, modelo, int(input_tokens or 0), int(output_tokens or 0), hoy_cdmx()),
+            (conversation_id, modelo, int(input_tokens or 0), int(output_tokens or 0), fila_id),
         )
         conn.commit()
     finally:
@@ -430,20 +484,23 @@ def registrar_uso(conversation_id, modelo: str, input_tokens: int, output_tokens
 
 def resumen_uso() -> dict:
     """
-    Totales de tokens (todo el histórico, el mes y solo hoy, en CDMX). El costo
-    se calcula en el endpoint con los precios configurables; aquí solo
-    agregamos tokens.
+    Totales de tokens del usuario en curso (todo el histórico, el mes y solo
+    hoy, en CDMX). El costo se calcula en el endpoint con los precios
+    configurables; aquí solo agregamos tokens.
     """
+    from auth import uid
+
+    usuario_id = uid()
     conn = get_connection()
     try:
 
-        def agrega(where: str = "", params: tuple = ()) -> dict:
+        def agrega(condicion_extra: str = "", params: tuple = ()) -> dict:
             fila = conn.execute(
                 f"""
                 SELECT COUNT(*), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-                FROM uso_ia {where}
+                FROM uso_ia WHERE usuario_id = ? {condicion_extra}
                 """,
-                params,
+                (usuario_id, *params),
             ).fetchone()
             return {"llamadas": fila[0], "input_tokens": fila[1], "output_tokens": fila[2]}
 
@@ -451,9 +508,35 @@ def resumen_uso() -> dict:
             "total": agrega(),
             # fecha es TEXT "YYYY-MM-DD" (hoy_cdmx()); los primeros 7 caracteres
             # son el mes, sin necesitar funciones de fecha de SQLite.
-            "mes": agrega("WHERE substr(fecha, 1, 7) = ?", (mes_cdmx(),)),
-            "hoy": agrega("WHERE fecha = ?", (hoy_cdmx(),)),
+            "mes": agrega("AND substr(fecha, 1, 7) = ?", (mes_cdmx(),)),
+            "hoy": agrega("AND fecha = ?", (hoy_cdmx(),)),
         }
+    finally:
+        conn.close()
+
+
+def obtener_usuario_de_conversacion(conversation_id: str) -> int | None:
+    """None si esta conversación nunca se registró como de nadie (conversation_id
+    desconocido/ajeno) — /chat lo trata igual que "no es tuya"."""
+    conn = get_connection()
+    try:
+        fila = conn.execute(
+            "SELECT usuario_id FROM conversaciones WHERE conversation_id = ?", (conversation_id,)
+        ).fetchone()
+        return fila[0] if fila else None
+    finally:
+        conn.close()
+
+
+def crear_conversacion_si_falta(conversation_id: str, usuario_id: int) -> None:
+    """Registra el dueño de una conversation_id nueva (idempotente)."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO conversaciones (conversation_id, usuario_id) VALUES (?, ?)",
+            (conversation_id, usuario_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 
