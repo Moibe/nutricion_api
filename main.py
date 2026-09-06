@@ -327,6 +327,13 @@ class ChatEjercicioRequest(BaseModel):
     # Solo al AGREGAR un ejercicio nuevo el mismo día que ya tiene otros:
     # lista recortada de esos otros conceptos. Ver ChatRequest.contexto_hermanos.
     contexto_hermanos: Optional[str] = None
+    # Peso corporal más reciente del usuario (de /metricas-ios, capturado a
+    # mano o por el Atajo de iOS) — se manda en el primer turno para que el
+    # asistente no tenga que preguntarlo cada vez que sea relevante para el
+    # cálculo. A diferencia de contexto/contexto_hermanos (mutuamente
+    # excluyentes entre sí), este SÍ aplica en cualquier modo, incluida la
+    # edición.
+    peso_kg: Optional[float] = None
     imagen_base64: Optional[str] = None
 
     _imagen_valida = field_validator("imagen_base64")(_validar_imagen_base64)
@@ -346,10 +353,18 @@ def chat_ejercicio(req: ChatEjercicioRequest):
     usuario_id = uid()
     conversation_id = _resolver_conversacion(req.conversation_id, usuario_id)
 
+    prefacio_peso = (
+        f"Peso corporal más reciente del usuario: {req.peso_kg} kg (para referencia, "
+        "úsalo si es relevante para el cálculo; no preguntes por el peso salvo que "
+        "el usuario diga que cambió o que este dato no aplica).\n\n"
+        if req.peso_kg
+        else ""
+    )
+
     entrada = req.mensaje
     if req.contexto:
         entrada = (
-            "El usuario está EDITANDO un ejercicio que ya había calculado antes:\n"
+            prefacio_peso + "El usuario está EDITANDO un ejercicio que ya había calculado antes:\n"
             f"{req.contexto}\n\n"
             f"Su indicación para modificarlo es: {req.mensaje}\n\n"
             "Recalcula el ejercicio completo tomando en cuenta esta modificación. "
@@ -358,12 +373,14 @@ def chat_ejercicio(req: ChatEjercicioRequest):
         )
     elif req.contexto_hermanos:
         entrada = (
-            "Ese mismo día ya se registraron estos otros ejercicios (solo como "
+            prefacio_peso + "Ese mismo día ya se registraron estos otros ejercicios (solo como "
             "referencia, por si el usuario menciona o compara contra alguno; "
             "no los repitas ni los incluyas en el cálculo de este mensaje):\n"
             f"{req.contexto_hermanos}\n\n"
             f"Mensaje del usuario: {req.mensaje}"
         )
+    elif prefacio_peso:
+        entrada = f"{prefacio_peso}Mensaje del usuario: {req.mensaje}"
 
     respuesta = _turno_chat(
         usuario_id=usuario_id,
