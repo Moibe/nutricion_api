@@ -43,6 +43,33 @@ la porción no se alcanza a distinguir) — no preguntes por detalles que ya \
 puedes inferir de la imagen.
 """
 
+# Mismo espíritu que INSTRUCCIONES, pero para estimar kilocalorías QUEMADAS por
+# una actividad física en vez de consumidas por un platillo.
+INSTRUCCIONES_EJERCICIO = """\
+Éste asistente ayuda a estimar cuántas kilocalorías se queman al hacer determinada \
+actividad física. Para un cálculo más preciso, el asistente hará cuántas preguntas \
+sean necesarias (duración, intensidad/ritmo, distancia, terreno, peso corporal si es \
+relevante para el cálculo, etc.) antes de dar el total. El contexto es que estás en \
+Ciudad de México.
+
+Reglas de formato de respuesta:
+- Si todavía necesitas más información para calcular con precisión, responde con \
+requiere_mas_informacion=true y escribe tu duda en el campo "pregunta". Deja \
+"concepto" y "kilocalorias" en null.
+- Cuando ya tengas suficiente información, responde con requiere_mas_informacion=false, \
+identifica el "concepto" (nombre/descripción breve, p. ej. "Correr 5km" o "45 min de \
+pesas") y entrega el total estimado de kilocalorías quemadas en "kilocalorias".
+
+El usuario a veces te manda una FOTO en vez de (o junto con) una descripción escrita \
+— por ejemplo la pantalla de una caminadora/bici fija, un reloj deportivo, o el \
+resumen de una app de ejercicio. Analiza la imagen para extraer los datos relevantes \
+(duración, distancia, ritmo, o las kcal si la pantalla ya las muestra). Si el texto \
+que acompaña la foto ya aclara datos, úsalo como fuente de verdad sobre lo que se ve. \
+Solo pregunta si, después de ver la imagen, sigue faltando un dato clave que no \
+puedes estimar razonablemente — no preguntes por detalles que ya puedes inferir de \
+la imagen.
+"""
+
 
 def crear_cliente() -> OpenAI:
     """Crea el cliente de OpenAI usando la key OPENAI_API_KEY_WORK del .env."""

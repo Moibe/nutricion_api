@@ -164,6 +164,19 @@ def asegurar_schema() -> None:
             )
             """
         )
+        # Migración in-place para bases creadas antes del chat de IA de
+        # ejercicio: conversation_id (nullable -- las entradas de la captura
+        # manual de siempre nunca tienen una) identifica qué fila viene de qué
+        # conversación, para poder reabrirla a "editar" y para el upsert de
+        # guardar_ejercicio_chat. NULL no choca con NULL en un índice UNIQUE de
+        # SQLite, así que muchas filas manuales conviven sin problema.
+        columnas_ejercicios = {fila[1] for fila in conn.execute("PRAGMA table_info(ejercicios)")}
+        if "conversation_id" not in columnas_ejercicios:
+            conn.execute("ALTER TABLE ejercicios ADD COLUMN conversation_id TEXT")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_ejercicios_usuario_conversation "
+            "ON ejercicios(usuario_id, conversation_id)"
+        )
         # Favoritos: platillos que el usuario decide "recordar" con sus macros ya
         # calculados por la IA, para reusarlos después con un tap (POST directo a
         # /consumos) en vez de volver a describirlos y gastar otra llamada.
@@ -176,6 +189,22 @@ def asegurar_schema() -> None:
                 proteinas REAL,
                 carbohidratos REAL,
                 grasas REAL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        # Mismo concepto que favoritos, pero para ejercicio -- tabla aparte en
+        # vez de reusar `favoritos` con un discriminador: mezclar "Taza de
+        # café" y "Correr 5km" en una sola lista de frecuentes sería confuso
+        # sin importar de qué chat se esté agregando, y ejercicio no necesita
+        # las 3 columnas de macros.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS favoritos_ejercicio (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
+                nombre TEXT NOT NULL,
+                kilocalorias REAL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             """
@@ -701,12 +730,63 @@ def listar_ejercicios(desde: str | None = None, hasta: str | None = None) -> lis
             params.append(hasta)
         where = f"WHERE {' AND '.join(condiciones)}"
         return [
-            {"id": f[0], "fecha": f[1], "concepto": f[2], "kilocalorias": f[3], "created_at": f[4]}
+            {
+                "id": f[0],
+                "fecha": f[1],
+                "concepto": f[2],
+                "kilocalorias": f[3],
+                "created_at": f[4],
+                "conversation_id": f[5],
+            }
             for f in conn.execute(
-                f"SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios {where} ORDER BY fecha DESC, id ASC",
+                f"SELECT id, fecha, concepto, kilocalorias, created_at, conversation_id "
+                f"FROM ejercicios {where} ORDER BY fecha DESC, id ASC",
                 params,
             )
         ]
+    finally:
+        conn.close()
+
+
+def guardar_ejercicio_chat(conversation_id: str, fecha: str, concepto: str | None, kilocalorias: float | None) -> dict:
+    """
+    Persiste el resultado final (concepto + kcal) del chat de IA en la tabla
+    `ejercicios`. Upsert por (usuario_id, conversation_id): mismo mecanismo de
+    "editar" que guardar_consumo -- el front reabre la MISMA conversación para
+    seguir chateando, y al guardar de nuevo esto actualiza esa fila en vez de
+    crear una nueva. Separada de crear_ejercicio (la captura manual de
+    siempre, sin conversation_id, siempre INSERT nuevo).
+    """
+    from auth import uid
+
+    usuario_id = uid()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ejercicios (usuario_id, conversation_id, fecha, concepto, kilocalorias)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(usuario_id, conversation_id) DO UPDATE SET
+                fecha = excluded.fecha,
+                concepto = excluded.concepto,
+                kilocalorias = excluded.kilocalorias
+            """,
+            (usuario_id, conversation_id, fecha, concepto, kilocalorias),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, fecha, concepto, kilocalorias, created_at FROM ejercicios "
+            "WHERE usuario_id = ? AND conversation_id = ?",
+            (usuario_id, conversation_id),
+        ).fetchone()
+        return {
+            "id": fila[0],
+            "fecha": fila[1],
+            "concepto": fila[2],
+            "kilocalorias": fila[3],
+            "created_at": fila[4],
+            "conversation_id": conversation_id,
+        }
     finally:
         conn.close()
 
@@ -798,6 +878,62 @@ def eliminar_favorito(favorito_id: int) -> None:
     try:
         cursor = conn.execute(
             "DELETE FROM favoritos WHERE id = ? AND usuario_id = ?", (favorito_id, uid())
+        )
+        if cursor.rowcount == 0:
+            raise ValueError(f"No existe el favorito {favorito_id}")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def crear_favorito_ejercicio(nombre: str, kilocalorias: float | None) -> dict:
+    """Guarda un ejercicio (con sus kcal ya estimadas) para reusar sin IA."""
+    from auth import uid
+
+    usuario_id = uid()
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO favoritos_ejercicio (usuario_id, nombre, kilocalorias) VALUES (?, ?, ?)",
+            (usuario_id, nombre, kilocalorias),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT id, nombre, kilocalorias, created_at FROM favoritos_ejercicio "
+            "WHERE id = ? AND usuario_id = ?",
+            (cursor.lastrowid, usuario_id),
+        ).fetchone()
+        return {"id": fila[0], "nombre": fila[1], "kilocalorias": fila[2], "created_at": fila[3]}
+    finally:
+        conn.close()
+
+
+def listar_favoritos_ejercicio() -> list[dict]:
+    """Todos los ejercicios frecuentes del usuario en curso, más reciente primero."""
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        return [
+            {"id": f[0], "nombre": f[1], "kilocalorias": f[2], "created_at": f[3]}
+            for f in conn.execute(
+                "SELECT id, nombre, kilocalorias, created_at FROM favoritos_ejercicio "
+                "WHERE usuario_id = ? ORDER BY id DESC",
+                (uid(),),
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def eliminar_favorito_ejercicio(favorito_id: int) -> None:
+    """Borra un ejercicio frecuente (ya no aparece en la lista rápida del chat)."""
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM favoritos_ejercicio WHERE id = ? AND usuario_id = ?", (favorito_id, uid())
         )
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el favorito {favorito_id}")

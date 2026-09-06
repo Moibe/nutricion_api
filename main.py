@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationInfo, field_validator
 
-from asistente import INSTRUCCIONES, MODELO, crear_cliente
+from asistente import INSTRUCCIONES, INSTRUCCIONES_EJERCICIO, MODELO, crear_cliente
 from auth import INTERNAL_TOKEN, requerir_admin, resolver_usuario, uid
 from connection import (
     actualizar_activo,
@@ -29,19 +29,23 @@ from connection import (
     crear_conversacion_si_falta,
     crear_ejercicio,
     crear_favorito,
+    crear_favorito_ejercicio,
     crear_usuario_admin,
     eliminar_comida,
     eliminar_consumo,
     eliminar_ejercicio,
     eliminar_favorito,
+    eliminar_favorito_ejercicio,
     get_connection,
     guardar_consumo,
+    guardar_ejercicio_chat,
     guardar_metrica_ios,
     guardar_perfil,
     hoy_cdmx,
     listar_comidas,
     listar_ejercicios,
     listar_favoritos,
+    listar_favoritos_ejercicio,
     listar_metricas_ios,
     listar_usuarios,
     obtener_perfil,
@@ -51,7 +55,7 @@ from connection import (
     resumen_uso,
     revocar_sesiones,
 )
-from schema import RespuestaKilocalculator
+from schema import RespuestaEjercicio, RespuestaKilocalculator
 
 client = crear_cliente()
 
@@ -100,6 +104,17 @@ app.add_middleware(
 TOPE_IMAGEN_BASE64_CHARS = 12_000_000  # ~9 MB decodificados
 
 
+def _validar_imagen_base64(v: Optional[str]) -> Optional[str]:
+    """Compartido por ChatRequest y ChatEjercicioRequest -- mismo tope y formato en los dos chats."""
+    if v is None:
+        return v
+    if not v.startswith("data:image/"):
+        raise ValueError("imagen_base64 debe ser un data URI (data:image/...)")
+    if len(v) > TOPE_IMAGEN_BASE64_CHARS:
+        raise ValueError("Imagen demasiado grande")
+    return v
+
+
 class ChatRequest(BaseModel):
     mensaje: str = ""
     # En el primer turno se omite; luego se reenvía el de la respuesta anterior
@@ -119,16 +134,7 @@ class ChatRequest(BaseModel):
     # se puede mandar sola o junto con mensaje.
     imagen_base64: Optional[str] = None
 
-    @field_validator("imagen_base64")
-    @classmethod
-    def _imagen_valida(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return v
-        if not v.startswith("data:image/"):
-            raise ValueError("imagen_base64 debe ser un data URI (data:image/...)")
-        if len(v) > TOPE_IMAGEN_BASE64_CHARS:
-            raise ValueError("Imagen demasiado grande")
-        return v
+    _imagen_valida = field_validator("imagen_base64")(_validar_imagen_base64)
 
 
 class ChatResponse(BaseModel):
@@ -178,39 +184,44 @@ def uso():
     }
 
 
-@router_protegido.post("/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def _resolver_conversacion(conversation_id: Optional[str], usuario_id: int) -> str:
     """
-    Un turno de conversación.
+    Si viene conversation_id, DEBE ser del usuario en curso — si no, 404
+    (mismo patrón que ya usa el resto de la API para "tocar lo ajeno": ni
+    siquiera se distingue "existe pero no es tuya" de "no existe"). Sin esto,
+    cualquiera podría mandar el conversation_id de otra persona y seguir
+    leyendo/escribiendo su conversación.
 
-    1) Si viene conversation_id, DEBE ser del usuario en curso — si no, 404
-       (mismo patrón que ya usa el resto de la API para "tocar lo ajeno": ni
-       siquiera se distingue "existe pero no es tuya" de "no existe"). Sin
-       esto, cualquiera podría mandar el conversation_id de otra persona y
-       seguir leyendo/escribiendo su conversación.
-    2) Si no hay conversation_id, crea una Conversation nueva y la registra
-       como propia ANTES de llamar a OpenAI — si la llamada de abajo falla,
-       un reintento con ese mismo id ya la encuentra bien atribuida.
-    3) Tope diario de tokens por usuario (ver TOPE_TOKENS_DIA_USUARIO).
-    4) Llama a responses.parse con el modelo, las instrucciones, el mensaje del
-       usuario y el schema estructurado. Al pasar `conversation`, OpenAI guarda
-       e incluye automáticamente el historial — no hay que reenviar mensajes.
+    Si no hay conversation_id, crea una Conversation nueva y la registra como
+    propia ANTES de llamar a OpenAI — si la llamada de después falla, un
+    reintento con ese mismo id ya la encuentra bien atribuida.
     """
-    if not req.mensaje.strip() and not req.imagen_base64:
-        raise HTTPException(status_code=422, detail="Falta mensaje o imagen.")
-
-    usuario_id = uid()
-
-    conversation_id = req.conversation_id
     if conversation_id is not None:
         dueño = obtener_usuario_de_conversacion(conversation_id)
         if dueño != usuario_id:
             raise HTTPException(status_code=404, detail="Conversación no encontrada.")
-    else:
-        conversation = client.conversations.create()
-        conversation_id = conversation.id
-        crear_conversacion_si_falta(conversation_id, usuario_id)
+        return conversation_id
+    conversation = client.conversations.create()
+    nuevo_id = conversation.id
+    crear_conversacion_si_falta(nuevo_id, usuario_id)
+    return nuevo_id
 
+
+def _turno_chat(
+    *,
+    usuario_id: int,
+    conversation_id: str,
+    entrada: str,
+    imagen_base64: Optional[str],
+    instrucciones: str,
+    schema: type,
+):
+    """
+    Un turno de conversación contra Responses API, compartido por /chat y
+    /chat-ejercicio: reserva de cupo, llamada al modelo (con o sin foto), y
+    ajuste de la reserva con el gasto real. Lo único que varía por dominio ya
+    llegó armado en `entrada`/`instrucciones`/`schema`.
+    """
     # Reserva ANTES de llamar a OpenAI (no "cuenta el uso y luego revisa"):
     # ver reservar_cupo_ia para el porqué (check-then-act con una llamada
     # lenta en medio es una carrera real entre requests concurrentes).
@@ -221,45 +232,23 @@ def chat(req: ChatRequest):
             detail=f"Ya usaste tu tope de tokens de hoy ({TOPE_TOKENS_DIA_USUARIO}).",
         )
 
-    entrada = req.mensaje
-    if req.contexto:
-        entrada = (
-            "El usuario está EDITANDO un consumo que ya había calculado antes:\n"
-            f"{req.contexto}\n\n"
-            f"Su indicación para modificarlo es: {req.mensaje}\n\n"
-            "Recalcula el platillo completo tomando en cuenta esta modificación. "
-            "Si necesitas más datos para el nuevo cálculo, pregunta; si no, "
-            "entrega el resultado final actualizado."
-        )
-    elif req.contexto_hermanos:
-        entrada = (
-            "En esta misma comida ya se registraron estos platillos (solo como "
-            "referencia, por si el usuario menciona o compara contra alguno, "
-            'p. ej. "del tamaño de X" o "como el anterior pero de chocolate"; '
-            "no los repitas ni los incluyas en el cálculo de este mensaje):\n"
-            f"{req.contexto_hermanos}\n\n"
-            f"Mensaje del usuario: {req.mensaje}"
-        )
-
     # Con foto: input multimodal (Responses API) — texto opcional + imagen.
     # Sin foto: se manda el string plano de siempre.
     entrada_final: object = entrada
-    if req.imagen_base64:
+    if imagen_base64:
         contenido: list[dict] = []
         if entrada.strip():
             contenido.append({"type": "input_text", "text": entrada})
-        contenido.append(
-            {"type": "input_image", "image_url": req.imagen_base64, "detail": "auto"}
-        )
+        contenido.append({"type": "input_image", "image_url": imagen_base64, "detail": "auto"})
         entrada_final = [{"role": "user", "content": contenido}]
 
     try:
         response = client.responses.parse(
             model=MODELO,
             conversation=conversation_id,
-            instructions=INSTRUCCIONES,
+            instructions=instrucciones,
             input=entrada_final,
-            text_format=RespuestaKilocalculator,
+            text_format=schema,
             temperature=1.0,
         )
     except Exception as exc:  # noqa: BLE001 — en PoC propagamos el detalle
@@ -282,7 +271,109 @@ def chat(req: ChatRequest):
     except Exception:  # noqa: BLE001 — el conteo de tokens nunca debe tumbar el chat
         pass
 
-    return ChatResponse(conversation_id=conversation_id, respuesta=response.output_parsed)
+    return response.output_parsed
+
+
+@router_protegido.post("/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    """
+    Un turno de conversación del Kilocalculator (comida). Ver _turno_chat para
+    el protocolo compartido con /chat-ejercicio (cupo, llamada a OpenAI).
+    """
+    if not req.mensaje.strip() and not req.imagen_base64:
+        raise HTTPException(status_code=422, detail="Falta mensaje o imagen.")
+
+    usuario_id = uid()
+    conversation_id = _resolver_conversacion(req.conversation_id, usuario_id)
+
+    entrada = req.mensaje
+    if req.contexto:
+        entrada = (
+            "El usuario está EDITANDO un consumo que ya había calculado antes:\n"
+            f"{req.contexto}\n\n"
+            f"Su indicación para modificarlo es: {req.mensaje}\n\n"
+            "Recalcula el platillo completo tomando en cuenta esta modificación. "
+            "Si necesitas más datos para el nuevo cálculo, pregunta; si no, "
+            "entrega el resultado final actualizado."
+        )
+    elif req.contexto_hermanos:
+        entrada = (
+            "En esta misma comida ya se registraron estos platillos (solo como "
+            "referencia, por si el usuario menciona o compara contra alguno, "
+            'p. ej. "del tamaño de X" o "como el anterior pero de chocolate"; '
+            "no los repitas ni los incluyas en el cálculo de este mensaje):\n"
+            f"{req.contexto_hermanos}\n\n"
+            f"Mensaje del usuario: {req.mensaje}"
+        )
+
+    respuesta = _turno_chat(
+        usuario_id=usuario_id,
+        conversation_id=conversation_id,
+        entrada=entrada,
+        imagen_base64=req.imagen_base64,
+        instrucciones=INSTRUCCIONES,
+        schema=RespuestaKilocalculator,
+    )
+    return ChatResponse(conversation_id=conversation_id, respuesta=respuesta)
+
+
+# --- Chat de ejercicio: mismo patrón que /chat, pero estima kcal QUEMADAS ----
+class ChatEjercicioRequest(BaseModel):
+    mensaje: str = ""
+    conversation_id: Optional[str] = None
+    # Solo al EDITAR un ejercicio ya guardado: descripción actual (concepto +
+    # kcal). Ver ChatRequest.contexto -- mismo mecanismo, otro dominio.
+    contexto: Optional[str] = None
+    # Solo al AGREGAR un ejercicio nuevo el mismo día que ya tiene otros:
+    # lista recortada de esos otros conceptos. Ver ChatRequest.contexto_hermanos.
+    contexto_hermanos: Optional[str] = None
+    imagen_base64: Optional[str] = None
+
+    _imagen_valida = field_validator("imagen_base64")(_validar_imagen_base64)
+
+
+class ChatEjercicioResponse(BaseModel):
+    conversation_id: str
+    respuesta: RespuestaEjercicio
+
+
+@router_protegido.post("/chat-ejercicio", response_model=ChatEjercicioResponse)
+def chat_ejercicio(req: ChatEjercicioRequest):
+    """Un turno de conversación del asistente de ejercicio. Ver /chat para el detalle del protocolo."""
+    if not req.mensaje.strip() and not req.imagen_base64:
+        raise HTTPException(status_code=422, detail="Falta mensaje o imagen.")
+
+    usuario_id = uid()
+    conversation_id = _resolver_conversacion(req.conversation_id, usuario_id)
+
+    entrada = req.mensaje
+    if req.contexto:
+        entrada = (
+            "El usuario está EDITANDO un ejercicio que ya había calculado antes:\n"
+            f"{req.contexto}\n\n"
+            f"Su indicación para modificarlo es: {req.mensaje}\n\n"
+            "Recalcula el ejercicio completo tomando en cuenta esta modificación. "
+            "Si necesitas más datos para el nuevo cálculo, pregunta; si no, "
+            "entrega el resultado final actualizado."
+        )
+    elif req.contexto_hermanos:
+        entrada = (
+            "Ese mismo día ya se registraron estos otros ejercicios (solo como "
+            "referencia, por si el usuario menciona o compara contra alguno; "
+            "no los repitas ni los incluyas en el cálculo de este mensaje):\n"
+            f"{req.contexto_hermanos}\n\n"
+            f"Mensaje del usuario: {req.mensaje}"
+        )
+
+    respuesta = _turno_chat(
+        usuario_id=usuario_id,
+        conversation_id=conversation_id,
+        entrada=entrada,
+        imagen_base64=req.imagen_base64,
+        instrucciones=INSTRUCCIONES_EJERCICIO,
+        schema=RespuestaEjercicio,
+    )
+    return ChatEjercicioResponse(conversation_id=conversation_id, respuesta=respuesta)
 
 
 # --- Guardado manual del platillo final (botón "Guardar" del front) -----------
@@ -553,6 +644,32 @@ def eliminar_ejercicio_endpoint(ejercicio_id: int):
     return {"ok": True}
 
 
+# --- Guardado del resultado del chat de ejercicio (botón "Guardar") ----------
+# Separado de /ejercicios (la captura manual de siempre, INSERT plano): esto
+# es un upsert por conversation_id, igual que /consumos -- así reabrir la
+# conversación de un ejercicio ya guardado y volver a guardar ACTUALIZA esa
+# fila en vez de duplicarla.
+class EjercicioChatIn(BaseModel):
+    conversation_id: str
+    fecha: str  # "YYYY-MM-DD"
+    concepto: Optional[str] = None
+    kilocalorias: Optional[float] = None
+
+    @field_validator("fecha")
+    @classmethod
+    def _fecha_valida(cls, v: str) -> str:
+        return _validar_fecha_iso(v)
+
+
+@router_protegido.post("/ejercicios/chat")
+def guardar_ejercicio_chat_endpoint(body: EjercicioChatIn):
+    """Guarda (o actualiza, si ya existía) el resultado final del chat de ejercicio."""
+    try:
+        return guardar_ejercicio_chat(body.conversation_id, body.fecha, body.concepto, body.kilocalorias)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
 # --- Favoritos: platillos ya calculados por la IA que el usuario guarda -------
 # para reusar con un tap (POST directo a /consumos, sin pasar por /chat), sin
 # volver a describirlos ni gastar otra llamada al modelo.
@@ -597,6 +714,50 @@ def eliminar_favorito_endpoint(favorito_id: int):
     """Borra un favorito de la lista rápida."""
     try:
         eliminar_favorito(favorito_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
+    return {"ok": True}
+
+
+# --- Favoritos de ejercicio: mismo concepto, tabla aparte (ver connection.py) -
+class FavoritoEjercicioIn(BaseModel):
+    nombre: str
+    kilocalorias: Optional[float] = None
+
+    @field_validator("nombre")
+    @classmethod
+    def _nombre_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("nombre no puede estar vacío")
+        return v
+
+
+@router_protegido.get("/favoritos-ejercicio")
+def listar_favoritos_ejercicio_endpoint():
+    """Lista de ejercicios guardados para reuso rápido en el chat."""
+    try:
+        return listar_favoritos_ejercicio()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@router_protegido.post("/favoritos-ejercicio")
+def crear_favorito_ejercicio_endpoint(favorito: FavoritoEjercicioIn):
+    """Guarda un ejercicio (botón "Guardar como frecuente" del chat de ejercicio)."""
+    try:
+        return crear_favorito_ejercicio(favorito.nombre, favorito.kilocalorias)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+@router_protegido.delete("/favoritos-ejercicio/{favorito_id}")
+def eliminar_favorito_ejercicio_endpoint(favorito_id: int):
+    """Borra un ejercicio frecuente de la lista rápida."""
+    try:
+        eliminar_favorito_ejercicio(favorito_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

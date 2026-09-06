@@ -50,3 +50,30 @@ class RespuestaKilocalculator(BaseModel):
     grasas: Optional[float] = Field(
         default=None, description="Grasas en gramos (g). Solo en el final."
     )
+
+
+class RespuestaEjercicio(BaseModel):
+    """
+    Mismo sobre de dos modos que RespuestaKilocalculator, pero para estimar
+    kilocalorías QUEMADAS por una actividad física en vez de consumidas por un
+    platillo -- sin macros (no aplican a ejercicio), y "concepto" en vez de
+    "platillo" (p. ej. "Correr 5km", "45 min de pesas").
+
+      * True  -> aún falta info. Llena `pregunta`; deja `concepto` y `kilocalorias` en null.
+      * False -> resultado final. Llena `concepto` y `kilocalorias`; deja `pregunta` en null.
+    """
+
+    requiere_mas_informacion: bool = Field(
+        description="True si el asistente necesita preguntar antes de poder calcular."
+    )
+    pregunta: Optional[str] = Field(
+        default=None,
+        description="La pregunta de seguimiento al usuario (solo si requiere_mas_informacion=True).",
+    )
+    concepto: Optional[str] = Field(
+        default=None,
+        description="Nombre/descripción breve del ejercicio identificado (solo en el resultado final).",
+    )
+    kilocalorias: Optional[float] = Field(
+        default=None, description="Kilocalorías (kcal) quemadas, estimadas. Solo en el final."
+    )
