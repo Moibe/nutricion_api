@@ -109,6 +109,12 @@ class ChatRequest(BaseModel):
     # (platillo + macros). Se inyecta en el primer turno para que el asistente
     # sepa qué está editando aunque el hilo de OpenAI ya no tenga ese contexto.
     contexto: Optional[str] = None
+    # Solo al AGREGAR un consumo nuevo a una comida que ya tiene otros: lista
+    # recortada (solo nombres) de esos otros platillos, para que el usuario
+    # pueda aludir a uno ("del tamaño de las gotitas de chocolate") sin
+    # repetir la descripción completa. Mutuamente excluyente con `contexto`
+    # (uno es edición, el otro es una conversación nueva).
+    contexto_hermanos: Optional[str] = None
     # Foto del platillo, como data URI (data:image/jpeg;base64,...) — opcional,
     # se puede mandar sola o junto con mensaje.
     imagen_base64: Optional[str] = None
@@ -224,6 +230,15 @@ def chat(req: ChatRequest):
             "Recalcula el platillo completo tomando en cuenta esta modificación. "
             "Si necesitas más datos para el nuevo cálculo, pregunta; si no, "
             "entrega el resultado final actualizado."
+        )
+    elif req.contexto_hermanos:
+        entrada = (
+            "En esta misma comida ya se registraron estos platillos (solo como "
+            "referencia, por si el usuario menciona o compara contra alguno, "
+            'p. ej. "del tamaño de X" o "como el anterior pero de chocolate"; '
+            "no los repitas ni los incluyas en el cálculo de este mensaje):\n"
+            f"{req.contexto_hermanos}\n\n"
+            f"Mensaje del usuario: {req.mensaje}"
         )
 
     # Con foto: input multimodal (Responses API) — texto opcional + imagen.
