@@ -41,6 +41,7 @@ from connection import (
     guardar_ejercicio_chat,
     guardar_metrica_ios,
     guardar_perfil,
+    guardar_preferencias,
     hoy_cdmx,
     listar_comidas,
     listar_ejercicios,
@@ -49,6 +50,7 @@ from connection import (
     listar_metricas_ios,
     listar_usuarios,
     obtener_perfil,
+    obtener_preferencias,
     obtener_usuario_de_conversacion,
     regenerar_codigo,
     reservar_cupo_ia,
@@ -821,6 +823,34 @@ def guardar_perfil_endpoint(body: PerfilIn):
     """Upsert del perfil (fecha_nacimiento/estatura/sexo)."""
     try:
         return guardar_perfil(body.fecha_nacimiento, body.estatura_cm, body.sexo)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+# --- Preferencias de presentación ----------------------------------------------
+class PreferenciasIn(BaseModel):
+    # 'ninguno' = verde/rojo de siempre. Los otros tres son los tipos de
+    # daltonismo que cambian qué pares de colores se confunden, cada uno con
+    # su propia paleta en el front (ver /configuracion).
+    daltonismo: Literal["ninguno", "protanopia", "deuteranopia", "tritanopia"]
+
+
+@router_protegido.get("/preferencias")
+def obtener_preferencias_endpoint():
+    """Nunca None: sin fila guardada regresa los defaults."""
+    try:
+        return obtener_preferencias()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail=f"No se pudieron leer las preferencias: {exc}"
+        ) from exc
+
+
+@router_protegido.post("/preferencias")
+def guardar_preferencias_endpoint(body: PreferenciasIn):
+    """Upsert de las preferencias del usuario en curso."""
+    try:
+        return guardar_preferencias(body.daltonismo)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 

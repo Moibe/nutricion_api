@@ -224,6 +224,24 @@ def asegurar_schema() -> None:
             )
             """
         )
+        # Preferencias de presentación, una fila por usuario. Aparte de `perfil`
+        # a propósito: perfil son datos del cuerpo (todos NOT NULL) y se captura
+        # una vez; esto es cómo quieres VER la app, y debe poder existir aunque
+        # nunca hayas capturado tu peso ni tu estatura.
+        #
+        # daltonismo: 'ninguno' (verde/rojo de siempre) o el tipo que aplique,
+        # para repintar con una paleta que sí se distinga. Lo elige cada quien
+        # en /configuracion; no afecta a los demás usuarios.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS preferencias (
+                usuario_id INTEGER PRIMARY KEY REFERENCES usuarios(id),
+                daltonismo TEXT NOT NULL DEFAULT 'ninguno'
+                    CHECK (daltonismo IN ('ninguno', 'protanopia', 'deuteranopia', 'tritanopia')),
+                actualizado_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -978,6 +996,46 @@ def obtener_perfil() -> dict | None:
         if fila is None:
             return None
         return {"fecha_nacimiento": fila[0], "estatura_cm": fila[1], "sexo": fila[2]}
+    finally:
+        conn.close()
+
+
+def obtener_preferencias() -> dict:
+    """
+    Preferencias del usuario en curso. Nunca None: quien no ha tocado nada
+    todavía recibe los valores por default, para que el front no tenga que
+    distinguir "sin fila" de "eligió lo de siempre".
+    """
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        fila = conn.execute(
+            "SELECT daltonismo FROM preferencias WHERE usuario_id = ?", (uid(),)
+        ).fetchone()
+        return {"daltonismo": fila[0] if fila else "ninguno"}
+    finally:
+        conn.close()
+
+
+def guardar_preferencias(daltonismo: str) -> dict:
+    """Upsert de las preferencias del usuario en curso (usuario_id es la PK)."""
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO preferencias (usuario_id, daltonismo)
+            VALUES (?, ?)
+            ON CONFLICT(usuario_id) DO UPDATE SET
+                daltonismo = excluded.daltonismo,
+                actualizado_at = CURRENT_TIMESTAMP
+            """,
+            (uid(), daltonismo),
+        )
+        conn.commit()
+        return {"daltonismo": daltonismo}
     finally:
         conn.close()
 
