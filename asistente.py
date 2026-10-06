@@ -72,10 +72,36 @@ la imagen.
 
 
 def crear_cliente() -> OpenAI:
-    """Crea el cliente de OpenAI usando la key OPENAI_API_KEY_WORK del .env."""
-    api_key = os.getenv("OPENAI_API_KEY_WORK")
-    if not api_key:
+    """
+    Crea el cliente de OpenAI. Hay dos keys posibles en .env -- la de CSI y la
+    personal -- y OPENAI_API_KEY_ACTIVA ("csi" | "propia") decide cuál usar en
+    este momento, para poder cambiar de cuál cuenta se factura sin borrar y
+    volver a pegar keys.
+
+    Retrocompatible con el .env viejo (una sola OPENAI_API_KEY_WORK): si
+    OPENAI_API_KEY_ACTIVA no está configurada, cae a esa -- así este cambio no
+    rompe un .env que todavía no se actualizó con las dos keys nuevas.
+    """
+    activa = os.getenv("OPENAI_API_KEY_ACTIVA", "").strip().lower()
+
+    if not activa:
+        api_key = os.getenv("OPENAI_API_KEY_WORK")
+        if api_key:
+            return OpenAI(api_key=api_key)
         raise RuntimeError(
-            "Falta OPENAI_API_KEY_WORK. Copia .env.example a .env y coloca tu key."
+            "Falta configurar la key de OpenAI. Define OPENAI_API_KEY_CSI y "
+            "OPENAI_API_KEY_PROPIA en .env, y OPENAI_API_KEY_ACTIVA=csi|propia "
+            "para elegir cuál se usa."
         )
+
+    variable_por_activa = {"csi": "OPENAI_API_KEY_CSI", "propia": "OPENAI_API_KEY_PROPIA"}
+    variable = variable_por_activa.get(activa)
+    if variable is None:
+        raise RuntimeError(
+            f'OPENAI_API_KEY_ACTIVA="{activa}" no es válido -- usa "csi" o "propia".'
+        )
+
+    api_key = os.getenv(variable)
+    if not api_key:
+        raise RuntimeError(f'Falta {variable} en .env (OPENAI_API_KEY_ACTIVA="{activa}").')
     return OpenAI(api_key=api_key)
