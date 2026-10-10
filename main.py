@@ -13,9 +13,12 @@ from datetime import date
 from typing import Literal, Optional
 
 import hmac
+import math
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Path
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ValidationInfo, field_validator
 
 from asistente import INSTRUCCIONES, INSTRUCCIONES_EJERCICIO, MODELO, crear_cliente
@@ -40,6 +43,7 @@ from connection import (
     guardar_consumo,
     guardar_ejercicio_chat,
     guardar_metrica_ios,
+    guardar_muy_frecuente,
     guardar_perfil,
     guardar_preferencias,
     hoy_cdmx,
@@ -47,6 +51,7 @@ from connection import (
     listar_ejercicios,
     listar_favoritos,
     listar_favoritos_ejercicio,
+    listar_muy_frecuentes,
     listar_metricas_ios,
     listar_usuarios,
     obtener_perfil,
@@ -72,6 +77,22 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Kilocalculator — Responses API PoC", version="0.0.1", lifespan=lifespan)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validacion_sin_eco(request, exc: RequestValidationError):
+    """
+    422 de validación SIN el eco del valor que llegó. El handler por default
+    devuelve cada error con su `input`; si ese valor es NaN/Infinity (JSON lo
+    permite en la entrada), json.dumps(allow_nan=False) revienta DENTRO del
+    handler y el cliente recibe un 500 en vez del 422. Solo se devuelven
+    type/loc/msg, que es lo que el front lee (ver extraerError).
+    """
+    errores = [
+        {"type": e.get("type"), "loc": list(e.get("loc", ())), "msg": e.get("msg")}
+        for e in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errores})
 
 # Todo lo que necesita saber DE QUIÉN son los datos vive acá, no en `app`
 # directo -- así un endpoint nuevo nace protegido por default con solo
@@ -782,6 +803,63 @@ def eliminar_favorito_ejercicio_endpoint(favorito_id: int):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo eliminar: {exc}") from exc
     return {"ok": True}
+
+
+# --- Muy frecuentes: 4 tarjetas fijas (slot 0-3) por usuario --------------------
+# Los platillos de todos los días, armados con el mismo prompteador de IA que
+# el chat de comida (el front manda el resultado ya calculado, igual que
+# /favoritos). PUT por slot = upsert: reemplazar la tarjeta 2 no mueve las demás.
+SLOTS_MUY_FRECUENTES = 4
+
+
+def _numero_no_negativo(v: Optional[float]) -> Optional[float]:
+    if v is None:
+        return v
+    if not math.isfinite(v) or v < 0:
+        raise ValueError("debe ser un número de 0 en adelante")
+    return v
+
+
+class MuyFrecuenteIn(BaseModel):
+    nombre: str
+    kilocalorias: float
+    proteinas: Optional[float] = None
+    carbohidratos: Optional[float] = None
+    grasas: Optional[float] = None
+
+    @field_validator("nombre")
+    @classmethod
+    def _nombre_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("nombre no puede estar vacío")
+        return v
+
+    _kcal_valida = field_validator("kilocalorias")(_numero_no_negativo)
+    _macros_validos = field_validator("proteinas", "carbohidratos", "grasas")(_numero_no_negativo)
+
+
+@router_protegido.get("/muy-frecuentes")
+def listar_muy_frecuentes_endpoint():
+    """Solo los slots ya llenados (0-3); los vacíos simplemente no aparecen."""
+    try:
+        return listar_muy_frecuentes()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@router_protegido.put("/muy-frecuentes/{slot}")
+def guardar_muy_frecuente_endpoint(
+    body: MuyFrecuenteIn,
+    slot: int = Path(ge=0, lt=SLOTS_MUY_FRECUENTES),
+):
+    """Llena (o reemplaza) la tarjeta `slot` del usuario en curso."""
+    try:
+        return guardar_muy_frecuente(
+            slot, body.nombre, body.kilocalorias, body.proteinas, body.carbohidratos, body.grasas
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 
 
 # --- Perfil: fecha de nacimiento/estatura/sexo, para calcular metabolismo ----

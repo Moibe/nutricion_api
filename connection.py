@@ -209,6 +209,26 @@ def asegurar_schema() -> None:
             )
             """
         )
+        # "Muy frecuentes": 4 tarjetas fijas por usuario (slot 0-3) con los
+        # platillos de todos los días. Tabla aparte de `favoritos` a propósito:
+        # los favoritos son una lista que crece sin tope; esto es un tablero de
+        # posiciones fijas, donde reemplazar el slot 2 no debe mover los demás.
+        # La PK (usuario_id, slot) es lo que da el upsert por posición.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS muy_frecuentes (
+                usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
+                slot INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 3),
+                nombre TEXT NOT NULL,
+                kilocalorias REAL,
+                proteinas REAL,
+                carbohidratos REAL,
+                grasas REAL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (usuario_id, slot)
+            )
+            """
+        )
         # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
         # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
         # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
@@ -956,6 +976,80 @@ def eliminar_favorito_ejercicio(favorito_id: int) -> None:
         if cursor.rowcount == 0:
             raise ValueError(f"No existe el favorito {favorito_id}")
         conn.commit()
+    finally:
+        conn.close()
+
+
+# --- "Muy frecuentes": 4 tarjetas fijas por usuario (ver tabla muy_frecuentes) -
+def _fila_muy_frecuente(f) -> dict:
+    return {
+        "slot": f[0],
+        "nombre": f[1],
+        "kilocalorias": f[2],
+        "proteinas": f[3],
+        "carbohidratos": f[4],
+        "grasas": f[5],
+        "updated_at": f[6],
+    }
+
+
+def listar_muy_frecuentes() -> list[dict]:
+    """Solo los slots ya llenados del usuario en curso, ordenados por slot (0-3)."""
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        return [
+            _fila_muy_frecuente(f)
+            for f in conn.execute(
+                "SELECT slot, nombre, kilocalorias, proteinas, carbohidratos, grasas, updated_at "
+                "FROM muy_frecuentes WHERE usuario_id = ? ORDER BY slot",
+                (uid(),),
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def guardar_muy_frecuente(
+    slot: int,
+    nombre: str,
+    kilocalorias: float | None,
+    proteinas: float | None,
+    carbohidratos: float | None,
+    grasas: float | None,
+) -> dict:
+    """
+    Upsert del platillo de un slot (0-3) del usuario en curso: si el slot ya
+    tenía algo, lo reemplaza; los otros tres no se tocan.
+    """
+    from auth import uid
+
+    usuario_id = uid()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO muy_frecuentes
+                (usuario_id, slot, nombre, kilocalorias, proteinas, carbohidratos, grasas)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(usuario_id, slot) DO UPDATE SET
+                nombre = excluded.nombre,
+                kilocalorias = excluded.kilocalorias,
+                proteinas = excluded.proteinas,
+                carbohidratos = excluded.carbohidratos,
+                grasas = excluded.grasas,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (usuario_id, slot, nombre, kilocalorias, proteinas, carbohidratos, grasas),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT slot, nombre, kilocalorias, proteinas, carbohidratos, grasas, updated_at "
+            "FROM muy_frecuentes WHERE usuario_id = ? AND slot = ?",
+            (usuario_id, slot),
+        ).fetchone()
+        return _fila_muy_frecuente(fila)
     finally:
         conn.close()
 
