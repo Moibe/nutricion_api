@@ -44,6 +44,7 @@ from connection import (
     guardar_ejercicio_chat,
     guardar_metrica_ios,
     guardar_muy_frecuente,
+    guardar_muy_frecuente_ejercicio,
     guardar_perfil,
     guardar_preferencias,
     hoy_cdmx,
@@ -52,6 +53,7 @@ from connection import (
     listar_favoritos,
     listar_favoritos_ejercicio,
     listar_muy_frecuentes,
+    listar_muy_frecuentes_ejercicio,
     listar_metricas_ios,
     listar_usuarios,
     obtener_perfil,
@@ -858,6 +860,43 @@ def guardar_muy_frecuente_endpoint(
         return guardar_muy_frecuente(
             slot, body.nombre, body.kilocalorias, body.proteinas, body.carbohidratos, body.grasas
         )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
+
+
+# --- "Muy frecuentes" de ejercicio: espejo del de comida, sin macros ---------
+class MuyFrecuenteEjercicioIn(BaseModel):
+    nombre: str
+    kilocalorias: float
+
+    @field_validator("nombre")
+    @classmethod
+    def _nombre_valido(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("nombre no puede estar vacío")
+        return v
+
+    _kcal_valida = field_validator("kilocalorias")(_numero_no_negativo)
+
+
+@router_protegido.get("/muy-frecuentes-ejercicio")
+def listar_muy_frecuentes_ejercicio_endpoint():
+    """Solo los slots ya llenados (0-3); los vacíos simplemente no aparecen."""
+    try:
+        return listar_muy_frecuentes_ejercicio()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"No se pudo listar: {exc}") from exc
+
+
+@router_protegido.put("/muy-frecuentes-ejercicio/{slot}")
+def guardar_muy_frecuente_ejercicio_endpoint(
+    body: MuyFrecuenteEjercicioIn,
+    slot: int = Path(ge=0, lt=SLOTS_MUY_FRECUENTES),
+):
+    """Llena (o reemplaza) la tarjeta `slot` de ejercicio del usuario en curso."""
+    try:
+        return guardar_muy_frecuente_ejercicio(slot, body.nombre, body.kilocalorias)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"No se pudo guardar: {exc}") from exc
 

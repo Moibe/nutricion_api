@@ -229,6 +229,24 @@ def asegurar_schema() -> None:
             )
             """
         )
+        # El espejo de muy_frecuentes para ejercicio. Tabla aparte (y no una
+        # columna "tipo" en la de comida) por la misma razón por la que
+        # favoritos y favoritos_ejercicio están separadas: los slots de un lado
+        # no tienen nada que ver con los del otro, y así cada tablero conserva
+        # su propia PK (usuario_id, slot). Sin macros: no aplican a una
+        # actividad física.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS muy_frecuentes_ejercicio (
+                usuario_id INTEGER NOT NULL REFERENCES usuarios(id),
+                slot INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 3),
+                nombre TEXT NOT NULL,
+                kilocalorias REAL,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (usuario_id, slot)
+            )
+            """
+        )
         # Perfil para calcular metabolismo basal (Mifflin-St Jeor): una sola fila
         # (id fijo en 1 — app de un solo usuario). fecha_nacimiento en vez de
         # "edad" porque la edad cambia con el tiempo y un número fijo se volvería
@@ -1050,6 +1068,66 @@ def guardar_muy_frecuente(
             (usuario_id, slot),
         ).fetchone()
         return _fila_muy_frecuente(fila)
+    finally:
+        conn.close()
+
+
+def _fila_muy_frecuente_ejercicio(f) -> dict:
+    return {
+        "slot": f[0],
+        "nombre": f[1],
+        "kilocalorias": f[2],
+        "updated_at": f[3],
+    }
+
+
+def listar_muy_frecuentes_ejercicio() -> list[dict]:
+    """Solo los slots ya llenados del usuario en curso, ordenados por slot (0-3)."""
+    from auth import uid
+
+    conn = get_connection()
+    try:
+        return [
+            _fila_muy_frecuente_ejercicio(f)
+            for f in conn.execute(
+                "SELECT slot, nombre, kilocalorias, updated_at "
+                "FROM muy_frecuentes_ejercicio WHERE usuario_id = ? ORDER BY slot",
+                (uid(),),
+            )
+        ]
+    finally:
+        conn.close()
+
+
+def guardar_muy_frecuente_ejercicio(slot: int, nombre: str, kilocalorias: float | None) -> dict:
+    """
+    Upsert del ejercicio de un slot (0-3) del usuario en curso: si el slot ya
+    tenía algo, lo reemplaza; los otros tres no se tocan.
+    """
+    from auth import uid
+
+    usuario_id = uid()
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO muy_frecuentes_ejercicio
+                (usuario_id, slot, nombre, kilocalorias)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(usuario_id, slot) DO UPDATE SET
+                nombre = excluded.nombre,
+                kilocalorias = excluded.kilocalorias,
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (usuario_id, slot, nombre, kilocalorias),
+        )
+        conn.commit()
+        fila = conn.execute(
+            "SELECT slot, nombre, kilocalorias, updated_at "
+            "FROM muy_frecuentes_ejercicio WHERE usuario_id = ? AND slot = ?",
+            (usuario_id, slot),
+        ).fetchone()
+        return _fila_muy_frecuente_ejercicio(fila)
     finally:
         conn.close()
 
