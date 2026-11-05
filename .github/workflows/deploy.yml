@@ -23,7 +23,7 @@ jobs:
             # en sí sea Python, pm2 es lo que lo supervisa).
             - name: deploy on droplet
               run: |
-                  ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use node >/dev/null && { [ -d ~/code/nutricion_api ] || git clone git@github.com:Moibe/nutricion_api.git ~/code/nutricion_api; } && cd ~/code/nutricion_api && git checkout main && git pull origin main && { [ -d venv ] || python3 -m venv venv; } && venv/bin/pip install -q -r requirements.txt && (pm2 restart nutricion-api --update-env || pm2 start "venv/bin/python" --name nutricion-api --interpreter none -- -m uvicorn main:app --host 0.0.0.0 --port 8002)'
+                  ssh ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }} 'export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh" && nvm use node >/dev/null && { [ -d ~/code/nutricion_api ] || git clone git@github.com:Moibe/nutricion_api.git ~/code/nutricion_api; } && cd ~/code/nutricion_api && git checkout main && git fetch origin main && git reset --keep FETCH_HEAD && { [ -d venv ] || python3 -m venv venv; } && venv/bin/pip install -q -r requirements.txt && (pm2 restart nutricion-api --update-env || pm2 start "venv/bin/python" --name nutricion-api --interpreter none -- -m uvicorn main:app --host 0.0.0.0 --port 8002)'
 
             - name: cleanup
               run: rm -rf ~/.ssh
